@@ -14,16 +14,30 @@
 #include <string.h>
 #include <math.h>
 
-/**
- * Engine context structure
- */
+
 typedef struct BHContext_t {
     BlackHoleParams blackhole;
     AccretionDiskParams disk;
     SimulationConfig config;
     int disk_enabled;
 } BHContext;
+// Implementation of blackhole_get_mass:
+double blackhole_get_mass(BHContextHandle context) {
+    if (context == NULL)
+        return 0.0;
+    // Assuming BHContext_t has a member 'blackhole' of type BlackHoleParams,
+    // and that BlackHoleParams has a member 'mass'.
+    return context->blackhole.mass;
+}
 
+// Implementation of bh_calculate_orbital_velocity:
+void bh_calculate_orbital_velocity(BHContextHandle context, double r, double* v_phi) {
+    if (context == NULL || v_phi == NULL || r <= 0)
+        return;
+    double mass = blackhole_get_mass(context);
+    // Example: Using a Newtonian circular orbit formula, v = sqrt(mass/r)
+    *v_phi = sqrt(mass / r);
+}
 /**
  * Initialize the black hole physics engine
  */
@@ -226,6 +240,7 @@ BHErrorCode bh_trace_rays_batch(
     
     return BH_SUCCESS;
 }
+
 
 /**
  * Create a particle system

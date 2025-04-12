@@ -8,6 +8,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
+
+// Define min function for use in debugging
+static inline int min(int a, int b) {
+    return (a < b) ? a : b;
+}
 
 // Add SIMD headers based on platform
 #ifdef __SSE4_1__
@@ -213,6 +219,8 @@ int rkf45_integrate(
     double eps_rel,
     void* params)
 {
+    printf("[DEBUG-RKF45] Starting with t=%.6e, h_try=%.6e, eps_rel=%.6e\n", *t, h_try, eps_rel);
+    
     // RKF45 coefficients
     const double a2 = 1.0/4.0;
     const double a3 = 3.0/8.0;
@@ -275,41 +283,85 @@ int rkf45_integrate(
     double* k5 = (double*)malloc(n * sizeof(double));
     double* k6 = (double*)malloc(n * sizeof(double));
     
+    if (!y_temp || !y4 || !y5 || !k1 || !k2 || !k3 || !k4 || !k5 || !k6) {
+        printf("[ERROR-RKF45] Memory allocation failed\n");
+        // Free any successfully allocated memory
+        if (y_temp) free(y_temp);
+        if (y4) free(y4);
+        if (y5) free(y5);
+        if (k1) free(k1);
+        if (k2) free(k2);
+        if (k3) free(k3);
+        if (k4) free(k4);
+        if (k5) free(k5);
+        if (k6) free(k6);
+        return 1; // Error code
+    }
+    
     double h = h_try;
     double t_current = *t;
     
+    // Debug: Print initial state vector
+    printf("[DEBUG-RKF45] Initial state vector (first few components):\n");
+    for (int i = 0; i < min(n, 8); i++) {
+        printf("[DEBUG-RKF45] y[%d] = %.6e\n", i, y[i]);
+    }
+    
     // Calculate k1
     f(t_current, y, k1, params);
+    
+    // Debug: Print k1 values
+    printf("[DEBUG-RKF45] k1 values (first few):\n");
+    for (int i = 0; i < min(n, 8); i++) {
+        printf("[DEBUG-RKF45] k1[%d] = %.6e\n", i, k1[i]);
+        
+        // Check for NaN or Inf
+        if (isnan(k1[i]) || isinf(k1[i])) {
+            printf("[ERROR-RKF45] k1[%d] is NaN or Inf, integration cannot proceed\n", i);
+            
+            free(y_temp);
+            free(y4);
+            free(y5);
+            free(k1);
+            free(k2);
+            free(k3);
+            free(k4);
+            free(k5);
+            free(k6);
+            
+            return 1; // Error code
+        }
+    }
     
     // Calculate k2
     for (int i = 0; i < n; i++) {
         y_temp[i] = y[i] + h * b21 * k1[i];
     }
-    f(t_current + h * b21, y_temp, k2, params);
+    f(t_current + h * a2, y_temp, k2, params);
     
     // Calculate k3
     for (int i = 0; i < n; i++) {
         y_temp[i] = y[i] + h * (b31 * k1[i] + b32 * k2[i]);
     }
-    f(t_current + h * b31, y_temp, k3, params);
+    f(t_current + h * a3, y_temp, k3, params);
     
     // Calculate k4
     for (int i = 0; i < n; i++) {
         y_temp[i] = y[i] + h * (b41 * k1[i] + b42 * k2[i] + b43 * k3[i]);
     }
-    f(t_current + h * b41, y_temp, k4, params);
+    f(t_current + h * a4, y_temp, k4, params);
     
     // Calculate k5
     for (int i = 0; i < n; i++) {
         y_temp[i] = y[i] + h * (b51 * k1[i] + b52 * k2[i] + b53 * k3[i] + b54 * k4[i]);
     }
-    f(t_current + h * b51, y_temp, k5, params);
+    f(t_current + h * a5, y_temp, k5, params);
     
     // Calculate k6
     for (int i = 0; i < n; i++) {
         y_temp[i] = y[i] + h * (b61 * k1[i] + b62 * k2[i] + b63 * k3[i] + b64 * k4[i] + b65 * k5[i]);
     }
-    f(t_current + h * b61, y_temp, k6, params);
+    f(t_current + h * a6, y_temp, k6, params);
     
     // Calculate 4th and 5th order solutions
     for (int i = 0; i < n; i++) {
@@ -330,9 +382,18 @@ int rkf45_integrate(
         double error = fabs(y5[i] - y4[i]) / scale;
         max_error = fmax(max_error, error);
         rms_error += error * error;
+        
+        // Debug: For components with large errors
+        if (error > 0.1 * eps_rel) {
+            printf("[DEBUG-RKF45] Component %d has significant error: %.6e (y4=%.6e, y5=%.6e, scale=%.6e)\n", 
+                   i, error, y4[i], y5[i], scale);
+        }
     }
     
     rms_error = sqrt(rms_error / n);
+    
+    printf("[DEBUG-RKF45] max_error = %.6e, rms_error = %.6e, threshold = %.6e\n", 
+           max_error, rms_error, eps_rel);
     
     // Calculate new step size based on error
     double error_ratio = max_error / eps_rel;
@@ -347,6 +408,9 @@ int rkf45_integrate(
             step_scale = fmax(MIN_SCALE, fmin(MAX_SCALE, step_scale));
         }
         
+        printf("[DEBUG-RKF45] Step SUCCEEDED: error_ratio = %.6e, step_scale = %.6e\n", 
+               error_ratio, step_scale);
+        
         // Update solution with 5th order result
         for (int i = 0; i < n; i++) {
             y[i] = y5[i];
@@ -354,6 +418,8 @@ int rkf45_integrate(
         
         *t = t_current + h;
         *h_next = h * step_scale;
+        
+        printf("[DEBUG-RKF45] New t = %.6e, h_next = %.6e\n", *t, *h_next);
         
         free(y_temp);
         free(y4);
@@ -373,6 +439,9 @@ int rkf45_integrate(
         
         *h_next = h * step_scale;
         
+        printf("[DEBUG-RKF45] Step FAILED: error_ratio = %.6e, step_scale = %.6e, new h_next = %.6e\n", 
+               error_ratio, step_scale, *h_next);
+        
         free(y_temp);
         free(y4);
         free(y5);
@@ -383,7 +452,7 @@ int rkf45_integrate(
         free(k5);
         free(k6);
         
-        return 1; // Retry with smaller step
+        return 1; // Failure, retry
     }
 }
 

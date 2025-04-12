@@ -11,6 +11,7 @@
 #include <string.h>
 #include <math.h>
 #include <omp.h>
+#include <stdio.h>
 
 /**
  * Structure to hold ray integration state
@@ -44,6 +45,10 @@ static void ray_derivatives(double t, const double state[], double derivatives[]
     double v_theta = state[4];
     double v_phi = state[5];
     
+    // DEBUG: Check for invalid inputs
+    printf("[DEBUG] ray_derivatives: t=%.6e, r=%.6e, theta=%.6e, phi=%.6e\n", t, r, theta, phi);
+    printf("[DEBUG] ray_derivatives: v_r=%.6e, v_theta=%.6e, v_phi=%.6e\n", v_r, v_theta, v_phi);
+    
     // Position derivatives are just velocities
     derivatives[0] = v_r;
     derivatives[1] = v_theta;
@@ -59,10 +64,31 @@ static void ray_derivatives(double t, const double state[], double derivatives[]
         double sin_theta = sin(theta);
         double sin_theta_sq = sin_theta * sin_theta;
         
+        // Check for potential division by zero or extreme values
+        if (r <= rs + BH_EPSILON) {
+            printf("[ERROR] ray_derivatives: r (%.6e) too close to or inside event horizon (%.6e)\n", r, rs);
+            // Clamp r to avoid numerical issues
+            r = rs + BH_EPSILON;
+            r_sq = r * r;
+        }
+        
+        if (fabs(sin_theta) < BH_EPSILON) {
+            printf("[WARNING] ray_derivatives: sin_theta (%.6e) near zero, at poles\n", sin_theta);
+            // Avoid division by zero in dphi calculation
+            sin_theta = (sin_theta >= 0.0) ? BH_EPSILON : -BH_EPSILON;
+            sin_theta_sq = sin_theta * sin_theta;
+        }
+        
+        // Calculate acceleration terms with safety checks
+        double term1 = -M / (r_sq * (1.0 - rs / r)) * (1.0 - rs / r);
+        double term2 = r * v_theta * v_theta;
+        double term3 = r * sin_theta_sq * v_phi * v_phi;
+        
+        printf("[DEBUG] acceleration terms: term1=%.6e, term2=%.6e, term3=%.6e\n", 
+               term1, term2, term3);
+               
         // dr/dt equation
-        derivatives[3] = -M / (r_sq * (1.0 - rs / r)) * (1.0 - rs / r) +
-                          r * v_theta * v_theta +
-                          r * sin_theta_sq * v_phi * v_phi;
+        derivatives[3] = term1 + term2 + term3;
         
         // dtheta/dt equation
         derivatives[4] = -2.0 * v_r * v_theta / r +
@@ -76,6 +102,18 @@ static void ray_derivatives(double t, const double state[], double derivatives[]
         // For simplicity, we'll use Schwarzschild for now
         derivatives[3] = derivatives[4] = derivatives[5] = 0.0;
     }
+    
+    // DEBUG: Check for NaN or Inf in derivatives
+    for (int i = 0; i < 6; i++) {
+        if (isnan(derivatives[i]) || isinf(derivatives[i])) {
+            printf("[ERROR] ray_derivatives: derivatives[%d] = %.6e is NaN or Inf\n", i, derivatives[i]);
+            // Set to zero to prevent propagation of invalid values
+            derivatives[i] = 0.0;
+        }
+    }
+    
+    printf("[DEBUG] derivatives: dr/dt=%.6e, dtheta/dt=%.6e, dphi/dt=%.6e\n", 
+           derivatives[3], derivatives[4], derivatives[5]);
     
     return;
 }
@@ -273,6 +311,13 @@ RayTraceResult integrate_photon_path(
     int* num_positions,
     RayTraceHit* hit)
 {
+    printf("[DEBUG] Starting photon path integration\n");
+    printf("[DEBUG] Initial position: (%.6e, %.6e, %.6e, %.6e)\n", 
+           position->t, position->x, position->y, position->z);
+    printf("[DEBUG] Direction: (%.6e, %.6e, %.6e)\n", direction->x, direction->y, direction->z);
+    printf("[DEBUG] Black hole mass: %.6e, spin: %.6e, schwarzschild_radius: %.6e\n", 
+           blackhole->mass, blackhole->spin, blackhole->schwarzschild_radius);
+    
     // Normalize the direction vector
     Vector3D norm_direction = vector3D_normalize(*direction);
     
@@ -286,6 +331,10 @@ RayTraceResult integrate_photon_path(
     // Fixed: properly use cartesian_to_spherical with input and output parameters
     Vector3D spherical_pos;
     cartesian_to_spherical(&cart_pos, &spherical_pos);
+    
+    printf("[DEBUG] Initial cart_pos: (%.6e, %.6e, %.6e)\n", cart_pos.x, cart_pos.y, cart_pos.z);
+    printf("[DEBUG] Initial spherical_pos: r=%.6e, theta=%.6e, phi=%.6e\n", 
+           spherical_pos.x, spherical_pos.y, spherical_pos.z);
     
     state[0] = position->t;     // Time
     state[1] = spherical_pos.x; // Radial coordinate r
@@ -320,6 +369,15 @@ RayTraceResult integrate_photon_path(
     // dφ/dλ = (-sin(φ)dx + cos(φ)dy)/(r*sin(θ))
     double dphi = (-sin(phi)*cart_vel.x + cos(phi)*cart_vel.y) / (r * sin(theta));
     
+    // Check for potential numerical issues in initial velocity calculation
+    if (fabs(sin(theta)) < BH_EPSILON) {
+        printf("[WARNING] integrate_photon_path: sin(theta) near zero at poles, clamping to avoid division by zero\n");
+        // Fix near-pole numerical issues
+        dphi = 0.0; // At poles, azimuthal component is indeterminate
+    }
+    
+    printf("[DEBUG] Initial velocities: dr=%.6e, dtheta=%.6e, dphi=%.6e\n", dr, dtheta, dphi);
+    
     // Set velocity components
     // dt/dλ calculated from null geodesic condition (ds²=0)
     SchwarzschildMetric metric_components;
@@ -333,13 +391,29 @@ RayTraceResult integrate_photon_path(
                          metric_components.g_thth * dtheta * dtheta + 
                          metric_components.g_phph * dphi * dphi) / metric_components.g_tt;
     
+    printf("[DEBUG] Metric components: g_tt=%.6e, g_rr=%.6e, g_thth=%.6e, g_phph=%.6e\n",
+           metric_components.g_tt, metric_components.g_rr, metric_components.g_thth, metric_components.g_phph);
+    printf("[DEBUG] dt_squared = %.6e\n", dt_squared);
+    
+    // Check for negative dt_squared which can occur due to numerical errors
+    if (dt_squared < 0.0) {
+        printf("[WARNING] integrate_photon_path: dt_squared (%.6e) is negative, setting to zero\n", dt_squared);
+        dt_squared = 0.0;
+    }
+    
     // Ensure dt/dλ is positive (forward in time)
-    double dt = sqrt(fmax(0.0, dt_squared));
+    double dt = sqrt(dt_squared);
     
     state[4] = dt;      // dt/dλ
     state[5] = dr;      // dr/dλ
     state[6] = dtheta;  // dθ/dλ
     state[7] = dphi;    // dφ/dλ
+    
+    printf("[DEBUG] Initial state vector:\n");
+    printf("[DEBUG] (t,r,theta,phi) = (%.6e, %.6e, %.6e, %.6e)\n", 
+           state[0], state[1], state[2], state[3]);
+    printf("[DEBUG] (dt,dr,dtheta,dphi) = (%.6e, %.6e, %.6e, %.6e)\n", 
+           state[4], state[5], state[6], state[7]);
     
     // Integration parameters
     RayIntegrationParams ray_params;
@@ -351,6 +425,9 @@ RayTraceResult integrate_photon_path(
     double t = 0.0;      // Integration parameter (not time)
     double h = config->time_step;
     double h_next = h;
+    
+    printf("[DEBUG] Starting integration with step size h=%.6e\n", h);
+    printf("[DEBUG] Max steps: %d, tolerance: %.6e\n", config->max_integration_steps, config->tolerance);
     
     // Path tracing variables
     int step_count = 0;
@@ -379,6 +456,28 @@ RayTraceResult integrate_photon_path(
         
         // Perform integration step based on selected method
         int retry = 0;
+        
+        // Before integration, check all state values for issues
+        int invalid_state = 0;
+        for (int i = 0; i < 8; i++) {
+            if (isnan(state[i]) || isinf(state[i])) {
+                printf("[ERROR] Step %d: state[%d] = %.6e is NaN or Inf before integration\n", 
+                       step_count, i, state[i]);
+                invalid_state = 1;
+            }
+        }
+        
+        if (invalid_state) {
+            printf("[ERROR] Aborting integration due to invalid state values\n");
+            result = RAY_ERROR;
+            break;
+        }
+        
+        // Periodically log the integration progress
+        if (step_count % 100 == 0) {
+            printf("[DEBUG] Step %d: r=%.6e, distance=%.6e, h=%.6e\n", 
+                   step_count, state[1], distance_traveled, h);
+        }
         
         switch (method) {
             case INTEGRATOR_RK4:
@@ -410,6 +509,8 @@ RayTraceResult integrate_photon_path(
                     
                     // If step failed, retry with smaller step size
                     if (retry) {
+                        printf("[DEBUG] Step %d: RKF45 step failed, retrying with h=%.6e\n", 
+                               step_count, h_current * 0.5);
                         h = h_current * 0.5;
                         continue;
                     }
@@ -467,6 +568,21 @@ RayTraceResult integrate_photon_path(
                 break;
         }
         
+        // After integration, check for invalid values
+        invalid_state = 0;
+        for (int i = 0; i < 8; i++) {
+            if (isnan(state[i]) || isinf(state[i])) {
+                printf("[ERROR] Step %d: state[%d] = %.6e is NaN or Inf after integration\n", 
+                       step_count, i, state[i]);
+                state[i] = (i < 4) ? prev_pos.x : 0.0; // Attempt recovery
+                invalid_state = 1;
+            }
+        }
+        
+        if (invalid_state) {
+            printf("[WARNING] Integration produced invalid values, attempting to continue with corrections\n");
+        }
+        
         // Convert current spherical position to Cartesian
         Vector3D new_sph_pos = {state[1], state[2], state[3]};
         
@@ -475,7 +591,15 @@ RayTraceResult integrate_photon_path(
         
         // Calculate distance traveled in this step
         Vector3D step_vec = vector3D_sub(current_pos, prev_pos);
-        distance_traveled += vector3D_length(step_vec);
+        double step_distance = vector3D_length(step_vec);
+        
+        // Check for unusually large step distance which might indicate numerical issues
+        if (step_distance > 10.0 * h) {
+            printf("[WARNING] Step %d: Large step distance %.6e detected, may indicate numerical issues\n", 
+                   step_count, step_distance);
+        }
+        
+        distance_traveled += step_distance;
         
         // Store the current position if requested
         if (path_positions != NULL && *num_positions < max_positions) {
@@ -487,12 +611,16 @@ RayTraceResult integrate_photon_path(
         
         // Check for hitting the event horizon
         if (state[1] <= blackhole->schwarzschild_radius + BH_EPSILON) {
+            printf("[DEBUG] Ray reached event horizon at step %d, r=%.6e\n", 
+                   step_count, state[1]);
             result = RAY_HORIZON;
             break;
         }
         
         // Check for maximum distance
         if (distance_traveled >= config->max_ray_distance) {
+            printf("[DEBUG] Ray reached maximum distance (%.6e) at step %d\n", 
+                   config->max_ray_distance, step_count);
             result = RAY_MAX_DISTANCE;
             break;
         }
@@ -500,9 +628,17 @@ RayTraceResult integrate_photon_path(
         step_count++;
     }
     
+    if (result == RAY_MAX_STEPS) {
+        printf("[DEBUG] Ray reached maximum steps (%d) without termination\n", 
+               config->max_integration_steps);
+    }
+    
     // Fill hit information
     fill_hit_info(hit, result, &current_pos, distance_traveled, step_count, 
                 state[1], blackhole->schwarzschild_radius, &state[4]);
+    
+    printf("[DEBUG] Integration complete: result=%d, steps=%d, distance=%.6e\n", 
+           result, step_count, distance_traveled);
     
     return result;
 }
