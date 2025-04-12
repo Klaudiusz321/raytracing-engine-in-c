@@ -1,0 +1,46 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Repair Remaining Compilation Errors & Warnings for Black Hole Simulation Engine
+
+## Overview
+
+After resolving the critical errors, there remain several warnings and errors related to:
+- Unused variables (e.g. `mass`, `A`, `Sigma_cube`, `Delta`, `r_isco_retrograde`, etc.)
+- Conflicts in structure members in function calls (for instance, the `RayIntegrationParams` not having members like `impact_parameter`, `angular_momentum`, `energy`)
+- Incorrect types when calling functions (e.g. passing a pointer instead of the expected type, wrong number of arguments for functions like the ODE integrator `rkf45_integrate`)
+- Missing fields in structures
+
+## Specific Issues
+
+1. **Unused Variables:**
+   - In `src/main.c` in `test_particle_orbits`, the variable `mass` is declared but never used.
+   - In `src/spacetime.c` functions (`calculate_kerr_metric`, `calculate_christoffel_symbols`, `calculate_effective_potential`, `get_isco_radius`, `calculate_kerr_christoffel`), several variables (`A`, `Sigma_cube`, `Delta`, `r_isco_retrograde`, `sin_theta_sq`) are computed but never used.
+   - In `src/raytracer.c` and `src/particle_sim.c` there are several warnings about unused variables, such as `phi`, `orbital_speed`, `h_next`, `accel_func`, `vel`, `pos`, etc.
+
+2. **Structure Member Mismatches in Ray Tracing:**
+   - In `src/raytracer.c`, within `ray_derivatives`, errors indicate that `RayIntegrationParams` does not have members named `impact_parameter`, `angular_momentum`, or `energy`.  
+     - **Action:** Verify the correct definition of the `RayIntegrationParams` structure (likely defined in one of the headers) and update the code to reference the correct member names or add them to the structure if missing.
+
+3. **Function Argument Problems in Mathematical Functions:**
+   - The ODE integrator function `rkf45_integrate` in `src/math_util.c` is called with too few arguments and with incompatible types for the function pointer `f`.  
+     - **Action:** Ensure that the declaration in the header file exactly matches the definition in the source file. Update calls so that all required arguments (and the correct types) are passed.
+   - Similarly, functions such as `cartesian_to_spherical` and `spherical_to_cartesian` are called with too few arguments – they need both an input and output pointer as declared.
+     - **Action:** Update the calls to these functions accordingly.
+
+4. **Incorrect Type for `calculate_time_dilation`:**
+   - In `src/raytracer.c`, calls to `calculate_time_dilation` are passing a `double` for the second argument, while its prototype expects a pointer to a `BlackHoleParams` structure.
+     - **Action:** Correct the call so that it passes a pointer to a valid `BlackHoleParams` instance.
+
+## Requirements
+
+Please perform the following tasks:
+- Remove or comment out any unused variables if they are not needed. (If they are needed later for debugging, consider wrapping them in debug conditionals.)
+- Fix the struct issues in `RayIntegrationParams` so that the correct member names are used or add them if they are missing.
+- Correct all function calls to match the header declarations precisely (including the number and type of arguments).
+- Verify that every function call that requires pointers (e.g., for coordinate conversions) passes both the input and output arguments as declared.
+- After making these changes, recompile the project with:
+  ```bash
+  gcc -Wall -Iinclude -o blackhole_sim.exe src/main.c src/math_util.c src/spacetime.c src/raytracer.c src/particle_sim.c src/blackhole_api.c
