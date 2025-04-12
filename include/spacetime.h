@@ -195,6 +195,6 @@ double calculate_ergosphere_radius(double theta, const BlackHoleParams* blackhol
  * @param blackhole Black hole parameters
  * @return ISCO radius
  */
-
+double get_isco_radius(const BlackHoleParams* blackhole);
 
 #endif /* SPACETIME_H */ 

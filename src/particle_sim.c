@@ -242,24 +242,41 @@ static void update_particle_geodesic(
     double theta = spherical_pos.y;
     double phi = spherical_pos.z;
     
-    // Extract velocity components
-    Vector3D vel = particle->velocity;
+    // Set up integration state and parameters
+    double state[8] = {
+        0.0,    // t - set to 0 since we only care about relative time
+        r,      // r
+        theta,  // theta
+        phi,    // phi
+        1.0,    // dt/ds - normalized 4-velocity
+        0.0,    // dr/ds - will be determined by velocity
+        0.0,    // dtheta/ds
+        0.0     // dphi/ds
+    };
     
-    // Calculate new position and velocity
-    // Simple Euler integration for demonstration
+    // Convert Cartesian velocity to spherical coordinates and set in state array
+    // (This is a simplification - a proper conversion would require the Jacobian)
+    double v_mag = vector3D_length(particle->velocity);
+    state[5] = v_mag * cos(theta) * cos(phi); // approximate dr/ds
+    state[6] = v_mag * sin(phi);              // approximate dtheta/ds
+    state[7] = v_mag * sin(theta) * cos(phi); // approximate dphi/ds
     
-    // For Schwarzschild metric, calculate derivatives
-    double rs = blackhole->schwarzschild_radius;
-    double factor = 1.0 - rs / r;
-    (void)factor;
+    // Set up integration parameters
+    ParticleIntegrationParams params;
+    params.blackhole = blackhole;
+    params.mass = particle->mass;
     
-    // Update position
-    r += vel.x * config->time_step;
-    theta += vel.y * config->time_step;
-    phi += vel.z * config->time_step;
+    // Integrate one step using particle_derivatives
+    double derivatives[8];
+    particle_derivatives(state, derivatives, &params);
     
-    // Create new position in spherical coordinates
-    Vector3D new_spherical = {r, theta, phi};
+    // Update state using Euler integration
+    for (int i = 0; i < 8; i++) {
+        state[i] += derivatives[i] * config->time_step;
+    }
+    
+    // Extract new position
+    Vector3D new_spherical = {state[1], state[2], state[3]};
     
     // Convert back to Cartesian
     Vector3D new_position;
@@ -268,8 +285,19 @@ static void update_particle_geodesic(
     // Update particle
     particle->position = new_position;
     
+    // Extract new velocity components from state array and convert to Cartesian
+    // (Again, a simplification)
+    double v_r = state[5];
+    double v_theta = state[6];
+    double v_phi = state[7];
+    
+    // Simple conversion of velocity back to Cartesian (approximate)
+    particle->velocity.x = v_r * sin(theta) * cos(phi) + r * v_theta * cos(theta) * cos(phi) - r * sin(theta) * v_phi * sin(phi);
+    particle->velocity.y = v_r * sin(theta) * sin(phi) + r * v_theta * cos(theta) * sin(phi) + r * sin(theta) * v_phi * cos(phi);
+    particle->velocity.z = v_r * cos(theta) - r * v_theta * sin(theta);
+    
     // Calculate time dilation at the new position
-    particle->time_dilation = calculate_time_dilation(r, blackhole);
+    particle->time_dilation = calculate_time_dilation(state[1], blackhole);
 }
 
 /**
