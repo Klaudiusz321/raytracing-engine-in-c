@@ -16,41 +16,122 @@ void main() {
 }
 )";
 
-// Fragment shader for black hole simulation
-// This is a placeholder - the actual ray tracing shader would be much more complex
+// Fragment shader for black hole simulation with proper ray tracing physics
 const char* blackHoleFragmentShaderSource = R"(
 #version 330 core
 out vec4 FragColor;
 in vec2 TexCoord;
 
+// Physics parameters from the backend
 uniform float mass;
 uniform float spin;
 uniform vec3 cameraPos;
 uniform int integrationSteps;
+uniform float maxDistance;
 uniform bool enableDopplerEffect;
 uniform bool enableGravitationalRedshift;
 
-void main() {
-    // This is just a placeholder
-    // The actual shader would perform ray tracing through curved spacetime
-    vec2 uv = TexCoord * 2.0 - 1.0;
-    float dist = length(uv);
+// Observer parameters
+uniform vec3 observerPosition;
+uniform vec3 observerLookDir;
+uniform vec3 observerUpDir;
+uniform float timeDilation;
+uniform float shadowRadius;
+
+// Accretion disk parameters
+uniform float diskInnerRadius;
+uniform float diskOuterRadius;
+uniform float diskTemperature;
+uniform bool showAccretionDisk;
+
+// Constants
+const float PI = 3.14159265359;
+const float G = 1.0; // Gravitational constant (in geometric units)
+const float c = 1.0; // Speed of light (in geometric units)
+
+vec3 calculateRayDirection(vec2 uv) {
+    // Use camera parameters to calculate ray direction
+    vec3 forward = normalize(observerLookDir);
+    vec3 right = normalize(cross(forward, observerUpDir));
+    vec3 up = normalize(cross(right, forward));
     
-    // Simple approximation of black hole shadow
-    float shadowRadius = 2.6 * mass;
+    return normalize(forward + uv.x * right + uv.y * up);
+}
+
+// Calculate gravitational lensing for Schwarzschild metric
+// This is a simplified version of the geodesic equation integration
+vec3 traceRay(vec3 rayOrigin, vec3 rayDir) {
+    // Current position and direction
+    vec3 pos = rayOrigin;
+    vec3 dir = rayDir;
     
-    if (dist < shadowRadius) {
-        FragColor = vec4(0.0, 0.0, 0.0, 1.0); // Black hole
-    } else {
-        // Simplified gravitational lensing effect
-        vec3 color = vec3(0.1, 0.2, 0.5); // Background color
+    float dt = maxDistance / float(integrationSteps);
+    float r = length(pos);
+    
+    // Simple ray marching
+    for (int i = 0; i < integrationSteps; i++) {
+        // Calculate gravitational acceleration
+        float r = length(pos);
         
-        // Add a simple distortion effect
-        float lensing = 1.0 - shadowRadius / (dist * 2.0);
-        color *= lensing;
+        // Check if we hit the black hole
+        if (r < shadowRadius) {
+            return vec3(0.0, 0.0, 0.0); // Black hole (event horizon)
+        }
         
-        FragColor = vec4(color, 1.0);
+        // Check for accretion disk hit
+        if (showAccretionDisk && abs(pos.y) < 0.1 * dt &&
+            r > diskInnerRadius && r < diskOuterRadius) {
+            
+            // Calculate disk temperature (simplified)
+            float temp = diskTemperature * pow(diskInnerRadius / r, 1.5);
+            
+            // Basic disk color from temperature
+            vec3 diskColor = vec3(1.0, 0.7 * temp, 0.4 * temp * temp);
+            
+            // Apply gravitational redshift if enabled
+            if (enableGravitationalRedshift) {
+                float redshift = sqrt(1.0 - shadowRadius / r);
+                diskColor *= redshift;
+            }
+            
+            // Apply Doppler effect if enabled
+            if (enableDopplerEffect) {
+                // Simplified Doppler shift based on orbital velocity
+                float orbitalSpeed = sqrt(mass / r);
+                float doppler = 1.0 + 0.5 * orbitalSpeed * (pos.x / r); // +ve on approaching side
+                diskColor.r *= doppler;
+                diskColor.gb *= (1.0 / doppler);
+            }
+            
+            return diskColor;
+        }
+        
+        // Calculate gravitational acceleration
+        vec3 acc = -3.0 * mass * pos / (r * r * r);
+        
+        // Apply curved spacetime bending to ray direction
+        dir = normalize(dir + acc * dt);
+        
+        // Update position
+        pos += dir * dt;
     }
+    
+    // Ray escaped to infinity - return background color (sky)
+    return vec3(0.1, 0.2, 0.5);
+}
+
+void main() {
+    // Convert from texture coordinates to screen space (-1 to 1)
+    vec2 uv = TexCoord * 2.0 - 1.0;
+    
+    // Calculate ray direction from camera
+    vec3 rayDir = calculateRayDirection(uv);
+    
+    // Trace ray through spacetime
+    vec3 color = traceRay(observerPosition, rayDir);
+    
+    // Output final color
+    FragColor = vec4(color, 1.0);
 }
 )";
 
@@ -225,12 +306,12 @@ bool Renderer::initOpenGL() {
     glfwSetWindowUserPointer(m_window, this);
     glfwSetFramebufferSizeCallback(m_window, framebufferSizeCallback);
     
-    // Initialize GLAD
+    // Initialize GLAD - use the correct function
     if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress)) {
         std::cerr << "Failed to initialize GLAD" << std::endl;
         return false;
     }
-
+    
     return true;
 }
 
@@ -362,14 +443,6 @@ void Renderer::renderFrame() {
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     
-    // In a full implementation, this would render:
-    // 1. The skybox (stars, galaxies)
-    // 2. The black hole (ray traced)
-    // 3. The accretion disk (particles or textured quad)
-    
-    // For now, we just use a simple shader to demonstrate black hole shadow
-    // This would be replaced with a much more sophisticated ray tracing shader
-    
     // Set up a fullscreen quad for ray tracing
     static const float vertices[] = {
         // Positions   // Texture Coords
@@ -403,7 +476,7 @@ void Renderer::renderFrame() {
     // Use the black hole shader
     m_blackHoleShader->use();
     
-    // Send uniforms to shader
+    // Send basic parameters to shader
     m_blackHoleShader->setFloat("mass", m_uiState.mass);
     m_blackHoleShader->setFloat("spin", m_uiState.spin);
     m_blackHoleShader->setVec3("cameraPos", 
@@ -411,11 +484,75 @@ void Renderer::renderFrame() {
                               m_camera->position.y, 
                               m_camera->position.z);
     m_blackHoleShader->setInt("integrationSteps", m_uiState.integrationSteps);
+    m_blackHoleShader->setFloat("maxDistance", 100.0f);
+    
+    // Calculate camera basis vectors without GLM
+    Vector3D camDir = {
+        m_camera->target.x - m_camera->position.x,
+        m_camera->target.y - m_camera->position.y,
+        m_camera->target.z - m_camera->position.z
+    };
+    
+    // Normalize direction
+    float dirLength = sqrt(camDir.x * camDir.x + camDir.y * camDir.y + camDir.z * camDir.z);
+    camDir.x /= dirLength;
+    camDir.y /= dirLength;
+    camDir.z /= dirLength;
+    
+    // Calculate right with cross product (assuming up is (0,1,0))
+    Vector3D camRight = {
+        camDir.z,
+        0.0f,
+        -camDir.x
+    };
+    
+    // Normalize right
+    float rightLength = sqrt(camRight.x * camRight.x + camRight.y * camRight.y + camRight.z * camRight.z);
+    camRight.x /= rightLength;
+    camRight.y /= rightLength;
+    camRight.z /= rightLength;
+    
+    // Calculate up with cross product
+    Vector3D camUp = {
+        camRight.y * camDir.z - camRight.z * camDir.y,
+        camRight.z * camDir.x - camRight.x * camDir.z,
+        camRight.x * camDir.y - camRight.y * camDir.x
+    };
+    
+    // Set observer position and direction
+    m_blackHoleShader->setVec3("observerPosition", 
+                             m_camera->position.x, 
+                             m_camera->position.y, 
+                             m_camera->position.z);
+    m_blackHoleShader->setVec3("observerLookDir", camDir.x, camDir.y, camDir.z);
+    m_blackHoleShader->setVec3("observerUpDir", camUp.x, camUp.y, camUp.z);
+    
+    // Get shadow radius directly from mass (known formula for Schwarzschild black hole)
+    float shadowRadius = 2.6f * m_uiState.mass;
+    
+    // Set physics parameters
+    m_blackHoleShader->setFloat("timeDilation", 1.0f); // Simplified time dilation
+    m_blackHoleShader->setFloat("shadowRadius", shadowRadius);
+    
+    // Set accretion disk parameters
+    float diskInnerRadius = 6.0f * m_uiState.mass; // ISCO for non-rotating BH
+    float diskOuterRadius = 20.0f * m_uiState.mass;
+    m_blackHoleShader->setFloat("diskInnerRadius", diskInnerRadius);
+    m_blackHoleShader->setFloat("diskOuterRadius", diskOuterRadius);
+    m_blackHoleShader->setFloat("diskTemperature", 1.0f);
+    
+    // Set boolean uniforms (using existing method for Shader class)
+    m_blackHoleShader->setInt("showAccretionDisk", m_uiState.showAccretionDisk ? 1 : 0);
     m_blackHoleShader->setInt("enableDopplerEffect", m_uiState.enableDopplerEffect ? 1 : 0);
     m_blackHoleShader->setInt("enableGravitationalRedshift", m_uiState.enableGravitationalRedshift ? 1 : 0);
     
     // Draw the quad
     glDrawArrays(GL_TRIANGLES, 0, 6);
+    
+    // Render accretion disk particles if enabled
+    if (m_uiState.showAccretionDisk) {
+        renderAccretionDiskParticles();
+    }
     
     // Cleanup
     glBindVertexArray(0);
@@ -504,6 +641,20 @@ void Renderer::updateCamera(float deltaTime) {
 }
 
 void Renderer::physicsThreadFunc() {
+    // Configure simulation using existing API
+    BHErrorCode error = bh_configure_simulation(
+        m_physicsContext,
+        0.01,  // Time step
+        100.0, // Max ray distance
+        m_uiState.integrationSteps, // Integration steps
+        1e-6   // Tolerance
+    );
+    
+    if (error != BH_SUCCESS) {
+        std::cerr << "Failed to configure simulation" << std::endl;
+        return;
+    }
+    
     // Create a particle system
     void* particleSystem = bh_create_particle_system(m_physicsContext, 1000);
     
@@ -534,8 +685,8 @@ void Renderer::physicsThreadFunc() {
         // Apply time scale from UI
         double scaledTimeStep = timeStep * m_uiState.timeScale;
         
-        // Update the simulation
-        BHErrorCode error = bh_update_particles(m_physicsContext, particleSystem);
+        // Update particles using existing API
+        error = bh_update_particles(m_physicsContext, particleSystem);
         
         if (error != BH_SUCCESS) {
             std::cerr << "Error updating particles" << std::endl;
@@ -666,4 +817,204 @@ void Renderer::framebufferSizeCallback(GLFWwindow* window, int width, int height
     // Update the renderer's width and height
     renderer->m_width = width;
     renderer->m_height = height;
+}
+
+void Renderer::renderAccretionDiskParticles() {
+    // Skip if particles shouldn't be shown or no data is ready
+    if (!m_uiState.showAccretionDisk || !m_dataReady)
+        return;
+
+    // Lock the render data
+    std::lock_guard<std::mutex> lock(m_renderDataMutex);
+    
+    // Check if we have any particles
+    if (m_renderDataFront->particlePositions.empty())
+        return;
+    
+    // Create simple point shader for particles if not already created
+    static const char* particleVertexShaderSource = R"(
+    #version 330 core
+    layout (location = 0) in vec3 aPos;
+    
+    uniform mat4 projection;
+    uniform mat4 view;
+    
+    void main() {
+        gl_Position = projection * view * vec4(aPos, 1.0);
+        gl_PointSize = 2.0;
+    }
+    )";
+    
+    static const char* particleFragmentShaderSource = R"(
+    #version 330 core
+    out vec4 FragColor;
+    
+    uniform vec3 particleColor;
+    
+    void main() {
+        FragColor = vec4(particleColor, 1.0);
+    }
+    )";
+    
+    // Create shader program for particles
+    static GLuint particleShader = 0;
+    if (particleShader == 0) {
+        // Compile particle vertex shader
+        GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vertexShader, 1, &particleVertexShaderSource, NULL);
+        glCompileShader(vertexShader);
+        
+        // Check for errors
+        GLint success;
+        char infoLog[512];
+        glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
+            std::cerr << "Particle vertex shader compilation failed: " << infoLog << std::endl;
+            return;
+        }
+        
+        // Compile particle fragment shader
+        GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fragmentShader, 1, &particleFragmentShaderSource, NULL);
+        glCompileShader(fragmentShader);
+        
+        // Check for errors
+        glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
+            std::cerr << "Particle fragment shader compilation failed: " << infoLog << std::endl;
+            return;
+        }
+        
+        // Link shaders
+        particleShader = glCreateProgram();
+        glAttachShader(particleShader, vertexShader);
+        glAttachShader(particleShader, fragmentShader);
+        glLinkProgram(particleShader);
+        
+        // Check for errors
+        glGetProgramiv(particleShader, GL_LINK_STATUS, &success);
+        if (!success) {
+            glGetProgramInfoLog(particleShader, 512, NULL, infoLog);
+            std::cerr << "Particle shader program linking failed: " << infoLog << std::endl;
+            return;
+        }
+        
+        // Clean up
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+    }
+    
+    // Setup particle positions in a VBO
+    GLuint particleVBO, particleVAO;
+    glGenBuffers(1, &particleVBO);
+    glGenVertexArrays(1, &particleVAO);
+    
+    glBindVertexArray(particleVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, particleVBO);
+    
+    // Copy particle positions to GPU
+    std::vector<float> particleData;
+    for (const auto& pos : m_renderDataFront->particlePositions) {
+        particleData.push_back(pos.x);
+        particleData.push_back(pos.y);
+        particleData.push_back(pos.z);
+    }
+    
+    glBufferData(GL_ARRAY_BUFFER, particleData.size() * sizeof(float), 
+                particleData.data(), GL_STATIC_DRAW);
+    
+    // Set vertex attributes
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    
+    // Use particle shader
+    glUseProgram(particleShader);
+    
+    // Create simple matrices manually without GLM
+    // Create a simple perspective projection matrix
+    float aspect = (float)m_width / (float)m_height;
+    float fov = 45.0f * 3.14159f / 180.0f; // Convert to radians
+    float near = 0.1f;
+    float far = 100.0f;
+    float tanHalfFov = tan(fov / 2.0f);
+    
+    // Simple perspective matrix (column-major)
+    float projMatrix[16] = {
+        1.0f / (aspect * tanHalfFov), 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f / tanHalfFov, 0.0f, 0.0f,
+        0.0f, 0.0f, -(far + near) / (far - near), -1.0f,
+        0.0f, 0.0f, -(2.0f * far * near) / (far - near), 0.0f
+    };
+    
+    // Create a simple lookAt view matrix from camera data
+    Vector3D forward = {
+        m_camera->target.x - m_camera->position.x,
+        m_camera->target.y - m_camera->position.y,
+        m_camera->target.z - m_camera->position.z
+    };
+    
+    // Normalize forward
+    float forwardLength = sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+    forward.x /= forwardLength;
+    forward.y /= forwardLength;
+    forward.z /= forwardLength;
+    
+    // Calculate right with cross product (assuming up is (0,1,0))
+    Vector3D right = {
+        forward.z,
+        0.0f,
+        -forward.x
+    };
+    
+    // Normalize right
+    float rightLength = sqrt(right.x * right.x + right.y * right.y + right.z * right.z);
+    right.x /= rightLength;
+    right.y /= rightLength;
+    right.z /= rightLength;
+    
+    // Calculate up with cross product
+    Vector3D up = {
+        right.y * forward.z - right.z * forward.y,
+        right.z * forward.x - right.x * forward.z,
+        right.x * forward.y - right.y * forward.x
+    };
+    
+    // Create view matrix (column-major)
+    float viewMatrix[16] = {
+        static_cast<float>(right.x), static_cast<float>(up.x), static_cast<float>(-forward.x), 0.0f,
+        static_cast<float>(right.y), static_cast<float>(up.y), static_cast<float>(-forward.y), 0.0f,
+        static_cast<float>(right.z), static_cast<float>(up.z), static_cast<float>(-forward.z), 0.0f,
+        -static_cast<float>(right.x * m_camera->position.x + right.y * m_camera->position.y + right.z * m_camera->position.z),
+        -static_cast<float>(up.x * m_camera->position.x + up.y * m_camera->position.y + up.z * m_camera->position.z),
+        static_cast<float>(forward.x * m_camera->position.x + forward.y * m_camera->position.y + forward.z * m_camera->position.z),
+        1.0f
+};
+    
+    // Set uniform values
+    GLint projLoc = glGetUniformLocation(particleShader, "projection");
+    GLint viewLoc = glGetUniformLocation(particleShader, "view");
+    GLint colorLoc = glGetUniformLocation(particleShader, "particleColor");
+    
+    glUniformMatrix4fv(projLoc, 1, GL_FALSE, projMatrix);
+    glUniformMatrix4fv(viewLoc, 1, GL_FALSE, viewMatrix);
+    glUniform3f(colorLoc, 1.0f, 0.5f, 0.2f); // Orange color for particles
+    
+    // Set point size and enable blending
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    
+    // Draw particles
+    glDrawArrays(GL_POINTS, 0, m_renderDataFront->particlePositions.size());
+    
+    // Restore state
+    glDisable(GL_BLEND);
+    glDisable(GL_PROGRAM_POINT_SIZE);
+    
+    // Cleanup
+    glBindVertexArray(0);
+    glDeleteVertexArrays(1, &particleVAO);
+    glDeleteBuffers(1, &particleVBO);
 } 
