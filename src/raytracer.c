@@ -778,4 +778,21 @@ int trace_rays_batch(
     }
     
     return 0;  // Success
+}
+
+void generate_gpu_shader_params(
+    const BlackHoleParams* blackhole,
+    const AccretionDiskParams* disk,
+    double observer_distance,
+    double fov,
+    GPUShaderParams* params)
+{
+    params->mass = blackhole->mass;
+    params->spin = blackhole->spin;
+    params->schwarzschild_radius = blackhole->schwarzschild_radius;
+    params->disk_inner_radius = disk->inner_radius;
+    params->disk_outer_radius = disk->outer_radius;
+    params->disk_temp_scale = disk->temperature_scale;
+    params->observer_distance = observer_distance;
+    params->fov = fov;
 } 

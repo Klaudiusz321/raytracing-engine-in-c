@@ -230,8 +230,7 @@ bool Renderer::initOpenGL() {
         std::cerr << "Failed to initialize GLAD" << std::endl;
         return false;
     }
-   \
-    
+
     return true;
 }
 
@@ -624,12 +623,16 @@ void Renderer::updatePhysicsParams() {
         lastSpin != m_uiState.spin) {
         
         // Update black hole parameters
-        bh_configure_black_hole(
+        BHErrorCode error = bh_configure_black_hole(
             m_physicsContext,
             m_uiState.mass,
             m_uiState.spin,
             0.0  // No charge
         );
+        
+        if (error != BH_SUCCESS) {
+            std::cerr << "Failed to update black hole parameters" << std::endl;
+        }
         
         lastMass = m_uiState.mass;
         lastSpin = m_uiState.spin;
@@ -637,26 +640,30 @@ void Renderer::updatePhysicsParams() {
     
     if (lastAccretionRate != m_uiState.accretionRate) {
         // Update accretion disk parameters
-        bh_configure_accretion_disk(
+        BHErrorCode error = bh_configure_accretion_disk(
             m_physicsContext,
-            6.0,  // Inner radius
+            6.0,  // Inner radius at ISCO
             20.0, // Outer radius
             1.0,  // Temperature scale
             m_uiState.accretionRate // Density scale
         );
+        
+        if (error != BH_SUCCESS) {
+            std::cerr << "Failed to update accretion disk parameters" << std::endl;
+        }
         
         lastAccretionRate = m_uiState.accretionRate;
     }
 }
 
 void Renderer::framebufferSizeCallback(GLFWwindow* window, int width, int height) {
-    // Update viewport when window is resized
+    // Get the renderer instance
+    Renderer* renderer = static_cast<Renderer*>(glfwGetWindowUserPointer(window));
+    
+    // Update the viewport
     glViewport(0, 0, width, height);
     
-    // Update renderer instance
-    Renderer* renderer = static_cast<Renderer*>(glfwGetWindowUserPointer(window));
-    if (renderer) {
-        renderer->m_width = width;
-        renderer->m_height = height;
-    }
+    // Update the renderer's width and height
+    renderer->m_width = width;
+    renderer->m_height = height;
 } 

@@ -135,6 +135,11 @@ private:
     void renderUI();
     
     /**
+     * Render accretion disk particles
+     */
+    void renderAccretionDiskParticles();
+    
+    /**
      * Update camera based on input
      */
     void updateCamera(float deltaTime);
