@@ -42,51 +42,242 @@ uniform float shadowRadius;
 uniform float diskInnerRadius;
 uniform float diskOuterRadius;
 uniform float diskTemperature;
-uniform bool showAccretionDisk;
+uniform int showAccretionDisk;
 
 // Constants
 const float PI = 3.14159265359;
-const float G = 1.0; // Gravitational constant (in geometric units)
-const float c = 1.0; // Speed of light (in geometric units)
+const float EPSILON = 1e-5;
+const int MAX_STEPS = 1000;
 
-vec3 calculateRayDirection(vec2 uv) {
-    // Use camera parameters to calculate ray direction
-    vec3 forward = normalize(observerLookDir);
-    vec3 right = normalize(cross(forward, observerUpDir));
-    vec3 up = normalize(cross(right, forward));
-    
-    return normalize(forward + uv.x * right + uv.y * up);
+// Converts 3D cartesian coordinates to spherical (r, theta, phi)
+vec3 cartesianToSpherical(vec3 cartesian) {
+    float r = length(cartesian);
+    float theta = acos(cartesian.y / r);
+    float phi = atan(cartesian.z, cartesian.x);
+    return vec3(r, theta, phi);
 }
 
-// Calculate gravitational lensing for Schwarzschild metric
-// This is a simplified version of the geodesic equation integration
-vec3 traceRay(vec3 rayOrigin, vec3 rayDir) {
-    // Current position and direction
-    vec3 pos = rayOrigin;
-    vec3 dir = rayDir;
+// Converts spherical coordinates (r, theta, phi) to 3D cartesian
+vec3 sphericalToCartesian(vec3 spherical) {
+    float r = spherical.x;
+    float theta = spherical.y;
+    float phi = spherical.z;
+    return vec3(
+        r * sin(theta) * cos(phi),
+        r * cos(theta),
+        r * sin(theta) * sin(phi)
+    );
+}
+
+// 4D state vector: [r, theta, phi, t, dr/dlambda, dtheta/dlambda, dphi/dlambda, dt/dlambda]
+// where lambda is the affine parameter
+
+// Calculates Schwarzschild Christoffel symbols for the geodesic equations
+void schwarzschildChristoffel(float r, float theta, out float[64] gamma) {
+    // Initialize all to zero
+    for (int i = 0; i < 64; i++) gamma[i] = 0.0;
     
-    float dt = maxDistance / float(integrationSteps);
-    float r = length(pos);
+    float rs = 2.0 * mass; // Schwarzschild radius
     
-    // Simple ray marching
+    // Non-zero components of the Christoffel symbols for Schwarzschild metric
+    float g00 = 1.0 - rs/r;
+    float g11 = -1.0 / g00;
+    
+    // Γᵗᵣₜ = Γᵗₜᵣ = M/(r(r-2M))
+    gamma[0*16 + 1*4 + 0] = gamma[0*16 + 0*4 + 1] = mass / (r * (r - rs));
+    
+    // Γʳₜₜ = M(r-2M)/r³
+    gamma[1*16 + 0*4 + 0] = mass * (r - rs) / (r*r*r);
+    
+    // Γʳᵣᵣ = -M/(r(r-2M))
+    gamma[1*16 + 1*4 + 1] = -mass / (r * (r - rs));
+    
+    // Γʳₜₕₜₕ = -(r-2M)
+    gamma[1*16 + 2*4 + 2] = -(r - rs);
+    
+    // Γʳₚₕᵢₚₕᵢ = -(r-2M)sin²θ
+    gamma[1*16 + 3*4 + 3] = -(r - rs) * sin(theta) * sin(theta);
+    
+    // Γᶿᵣᶿ = Γᶿᶿᵣ = 1/r
+    gamma[2*16 + 1*4 + 2] = gamma[2*16 + 2*4 + 1] = 1.0/r;
+    
+    // Γᶿₚₕᵢₚₕᵢ = -sin(θ)cos(θ)
+    gamma[2*16 + 3*4 + 3] = -sin(theta) * cos(theta);
+    
+    // Γᵠᵣᵠ = Γᵠᵠᵣ = 1/r
+    gamma[3*16 + 1*4 + 3] = gamma[3*16 + 3*4 + 1] = 1.0/r;
+    
+    // Γᵠₜₕₑₜₐₚₕᵢ = Γᵠₚₕᵢₜₕₑₜₐ = cot(θ)
+    gamma[3*16 + 2*4 + 3] = gamma[3*16 + 3*4 + 2] = 1.0 / tan(theta);
+}
+
+// Calculate derivatives for 4D geodesic equations - Schwarzschild
+void geodesicDerivatives(vec4 pos, vec4 vel, out vec4 acc) {
+    float r = pos.x;
+    float theta = pos.y;
+    float phi = pos.z;
+    
+    float dr_dl = vel.x;
+    float dtheta_dl = vel.y;
+    float dphi_dl = vel.z;
+    float dt_dl = vel.w;
+    
+    // Calculate Christoffel symbols
+    float gamma[64];
+    schwarzschildChristoffel(r, theta, gamma);
+    
+    // Geodesic equations for Schwarzschild metric (using Einstein summation convention)
+    // d²x^mu/dl² + Γ^mu_αβ * dx^α/dl * dx^β/dl = 0
+    
+    // Initialize accelerations
+    acc = vec4(0.0);
+    
+    // Calculate acceleration components using Christoffel symbols
+    // For each component mu, sum over all alpha and beta
+    for (int mu = 0; mu < 4; mu++) {
+        for (int alpha = 0; alpha < 4; alpha++) {
+            for (int beta = 0; beta < 4; beta++) {
+                int idx = mu*16 + alpha*4 + beta;
+                float vel_alpha = alpha == 0 ? dt_dl : (alpha == 1 ? dr_dl : (alpha == 2 ? dtheta_dl : dphi_dl));
+                float vel_beta = beta == 0 ? dt_dl : (beta == 1 ? dr_dl : (beta == 2 ? dtheta_dl : dphi_dl));
+                
+                acc[mu] -= gamma[idx] * vel_alpha * vel_beta;
+            }
+        }
+    }
+}
+
+// Kerr metric functions for Boyer-Lindquist coordinates
+float kerrDelta(float r) {
+    float a = spin * mass;
+    return r*r - 2.0*mass*r + a*a;
+}
+
+float kerrSigma(float r, float theta) {
+    float a = spin * mass;
+    return r*r + a*a*cos(theta)*cos(theta);
+}
+
+// Calculate derivatives for 4D geodesic equations - Kerr metric
+void kerrGeodesicDerivatives(vec4 pos, vec4 vel, out vec4 acc) {
+    float r = pos.x;
+    float theta = pos.y;
+    float phi = pos.z;
+    float t = pos.w;
+    
+    float dr_dl = vel.x;
+    float dtheta_dl = vel.y;
+    float dphi_dl = vel.z;
+    float dt_dl = vel.w;
+    
+    float a = spin * mass;
+    float sigma = kerrSigma(r, theta);
+    float delta = kerrDelta(r);
+    
+    // Initialize accelerations
+    acc = vec4(0.0);
+    
+    // r component acceleration
+    acc.x = -2.0*r*dr_dl*dr_dl/sigma
+           + sin(theta)*sin(theta)*a*a*sin(2.0*theta)*dtheta_dl*dtheta_dl/(2.0*sigma)
+           + r*(r*r + a*a)*sin(2.0*theta)*dphi_dl*dphi_dl/(2.0*sigma)
+           - 2.0*mass*r*r*dt_dl*dt_dl/pow(sigma, 3.0)
+           + a*a*sin(theta)*sin(theta)*r*dphi_dl*dphi_dl/sigma
+           - 2.0*a*r*dt_dl*dphi_dl/pow(sigma, 2.0)
+           + delta*sigma*dr_dl*dr_dl/(r*r);
+    
+    // theta component acceleration
+    acc.y = -sin(2.0*theta)*a*a*dr_dl*dr_dl/(2.0*sigma)
+           - 2.0*r*dr_dl*dtheta_dl/sigma
+           + sin(2.0*theta)*dt_dl*dt_dl*a*a/(2.0*pow(sigma, 2.0))
+           - (r*r + a*a)*sin(2.0*theta)*dphi_dl*dphi_dl/2.0
+           - a*a*sin(2.0*theta)*cos(2.0*theta)*dphi_dl*dphi_dl/2.0
+           + a*sin(2.0*theta)*dt_dl*dphi_dl/sigma;
+    
+    // phi component acceleration
+    acc.z = -2.0*dr_dl*dphi_dl/r
+           - 2.0*dtheta_dl*dphi_dl/tan(theta)
+           + 2.0*a*r*dr_dl*dt_dl/(delta*sigma)
+           - 2.0*a*sin(theta)*cos(theta)*dtheta_dl*dt_dl/sigma;
+    
+    // t component acceleration
+    acc.w = -2.0*mass*dr_dl*dt_dl/(sigma*delta)
+           + a*sin(theta)*sin(theta)*(r*r + a*a)*dr_dl*dphi_dl/(sigma*delta)
+           + 2.0*a*r*sin(theta)*sin(theta)*dtheta_dl*dphi_dl/sigma;
+}
+
+// Adaptive step RK4 integration of the geodesic equations
+vec3 traceGeodesic(vec3 rayOrigin, vec3 rayDir) {
+    // Initial position in spherical coordinates (r, theta, phi)
+    vec3 pos_spherical = cartesianToSpherical(rayOrigin);
+    float r = pos_spherical.x;
+    float theta = pos_spherical.y;
+    float phi = pos_spherical.z;
+    
+    // Initial 4-position (r, theta, phi, t)
+    vec4 pos = vec4(r, theta, phi, 0.0);
+    
+    // Convert direction to spherical coordinate derivatives
+    vec3 dir_cartesian = normalize(rayDir);
+    float dr_dl = dot(dir_cartesian, rayOrigin / r);
+    
+    // Calculate tangential components
+    vec3 e_theta = vec3(
+        cos(theta) * cos(phi),
+        -sin(theta),
+        cos(theta) * sin(phi)
+    );
+    
+    vec3 e_phi = vec3(
+        -sin(phi),
+        0.0,
+        cos(phi)
+    );
+    
+    float dtheta_dl = dot(dir_cartesian, e_theta) / r;
+    float dphi_dl = dot(dir_cartesian, e_phi) / (r * sin(theta));
+    
+    // For null geodesics (light), we can normalize dt_dl
+    float dt_dl = 1.0;
+    
+    // Initial 4-velocity
+    vec4 vel = vec4(dr_dl, dtheta_dl, dphi_dl, dt_dl);
+    
+    // Integration step size
+    float dl = maxDistance / float(integrationSteps);
+    
+    // RK4 integration of geodesic equations
     for (int i = 0; i < integrationSteps; i++) {
-        // Calculate gravitational acceleration
-        float r = length(pos);
-        
-        // Check if we hit the black hole
-        if (r < shadowRadius) {
-            return vec3(0.0, 0.0, 0.0); // Black hole (event horizon)
+        // Check for event horizon
+        if (r <= shadowRadius) {
+            return vec3(0.0, 0.0, 0.0); // Black hole
         }
         
-        // Check for accretion disk hit
-        if (showAccretionDisk && abs(pos.y) < 0.1 * dt &&
+        // Check for accretion disk intersection
+        vec3 pos_cartesian = sphericalToCartesian(vec3(r, theta, phi));
+        float disk_height = 0.1;
+        
+        if (showAccretionDisk == 1 && 
+            abs(pos_cartesian.y) < disk_height && 
             r > diskInnerRadius && r < diskOuterRadius) {
             
-            // Calculate disk temperature (simplified)
+            // Calculate disk temperature and color
             float temp = diskTemperature * pow(diskInnerRadius / r, 1.5);
-            
-            // Basic disk color from temperature
             vec3 diskColor = vec3(1.0, 0.7 * temp, 0.4 * temp * temp);
+            
+            // Apply Doppler effect if enabled
+            if (enableDopplerEffect) {
+                // Calculate orbital velocity at this radius
+                float v_orbit = sqrt(mass / r);
+                
+                // Simplified Doppler calculation based on orbital position
+                float cos_angle = pos_cartesian.x / sqrt(pos_cartesian.x*pos_cartesian.x + pos_cartesian.z*pos_cartesian.z);
+                float doppler = 1.0 + 0.5 * v_orbit * cos_angle;
+                
+                // Adjust color based on Doppler shift
+                diskColor.r *= doppler;
+                diskColor.gb *= (1.0 / doppler);
+            }
             
             // Apply gravitational redshift if enabled
             if (enableGravitationalRedshift) {
@@ -94,29 +285,58 @@ vec3 traceRay(vec3 rayOrigin, vec3 rayDir) {
                 diskColor *= redshift;
             }
             
-            // Apply Doppler effect if enabled
-            if (enableDopplerEffect) {
-                // Simplified Doppler shift based on orbital velocity
-                float orbitalSpeed = sqrt(mass / r);
-                float doppler = 1.0 + 0.5 * orbitalSpeed * (pos.x / r); // +ve on approaching side
-                diskColor.r *= doppler;
-                diskColor.gb *= (1.0 / doppler);
-            }
-            
             return diskColor;
         }
         
-        // Calculate gravitational acceleration
-        vec3 acc = -3.0 * mass * pos / (r * r * r);
+        // RK4 integration step
+        vec4 k1_pos, k1_vel, k2_pos, k2_vel, k3_pos, k3_vel, k4_pos, k4_vel;
         
-        // Apply curved spacetime bending to ray direction
-        dir = normalize(dir + acc * dt);
+        // Use appropriate geodesic equations based on spin
+        if (abs(spin) < EPSILON) {
+            // Schwarzschild metric
+            k1_pos = vel * dl;
+            geodesicDerivatives(pos, vel, k1_vel);
+            
+            k2_pos = (vel + 0.5 * k1_vel * dl) * dl;
+            geodesicDerivatives(pos + 0.5 * k1_pos, vel + 0.5 * k1_vel * dl, k2_vel);
+            
+            k3_pos = (vel + 0.5 * k2_vel * dl) * dl;
+            geodesicDerivatives(pos + 0.5 * k2_pos, vel + 0.5 * k2_vel * dl, k3_vel);
+            
+            k4_pos = (vel + k3_vel * dl) * dl;
+            geodesicDerivatives(pos + k3_pos, vel + k3_vel * dl, k4_vel);
+        } else {
+            // Kerr metric
+            k1_pos = vel * dl;
+            kerrGeodesicDerivatives(pos, vel, k1_vel);
+            
+            k2_pos = (vel + 0.5 * k1_vel * dl) * dl;
+            kerrGeodesicDerivatives(pos + 0.5 * k1_pos, vel + 0.5 * k1_vel * dl, k2_vel);
+            
+            k3_pos = (vel + 0.5 * k2_vel * dl) * dl;
+            kerrGeodesicDerivatives(pos + 0.5 * k2_pos, vel + 0.5 * k2_vel * dl, k3_vel);
+            
+            k4_pos = (vel + k3_vel * dl) * dl;
+            kerrGeodesicDerivatives(pos + k3_pos, vel + k3_vel * dl, k4_vel);
+        }
         
-        // Update position
-        pos += dir * dt;
+        // Update position and velocity
+        pos += (k1_pos + 2.0 * k2_pos + 2.0 * k3_pos + k4_pos) / 6.0;
+        vel += (k1_vel + 2.0 * k2_vel + 2.0 * k3_vel + k4_vel) / 6.0;
+        
+        // Update r, theta, phi for convenience
+        r = pos.x;
+        theta = pos.y;
+        phi = pos.z;
+        
+        // Adjust theta to avoid singularity
+        theta = mod(theta + PI, 2.0 * PI) - PI;
+        if (theta < 0.0) theta += PI;
+        pos.y = theta;
     }
     
-    // Ray escaped to infinity - return background color (sky)
+    // Ray escaped to infinity - return background color
+    // In a full implementation, this would sample from a starfield or skybox
     return vec3(0.1, 0.2, 0.5);
 }
 
@@ -124,11 +344,11 @@ void main() {
     // Convert from texture coordinates to screen space (-1 to 1)
     vec2 uv = TexCoord * 2.0 - 1.0;
     
-    // Calculate ray direction from camera
-    vec3 rayDir = calculateRayDirection(uv);
+    // Calculate ray direction from camera parameters
+    vec3 rayDir = normalize(observerLookDir + uv.x * cross(observerLookDir, observerUpDir) + uv.y * observerUpDir);
     
-    // Trace ray through spacetime
-    vec3 color = traceRay(observerPosition, rayDir);
+    // Trace geodesic through curved spacetime
+    vec3 color = traceGeodesic(observerPosition, rayDir);
     
     // Output final color
     FragColor = vec4(color, 1.0);
@@ -479,10 +699,14 @@ void Renderer::renderFrame() {
     // Send basic parameters to shader
     m_blackHoleShader->setFloat("mass", m_uiState.mass);
     m_blackHoleShader->setFloat("spin", m_uiState.spin);
+    
+    // Send camera position
     m_blackHoleShader->setVec3("cameraPos", 
                               m_camera->position.x, 
                               m_camera->position.y, 
                               m_camera->position.z);
+    
+    // Integration parameters
     m_blackHoleShader->setInt("integrationSteps", m_uiState.integrationSteps);
     m_blackHoleShader->setFloat("maxDistance", 100.0f);
     
@@ -528,7 +752,7 @@ void Renderer::renderFrame() {
     m_blackHoleShader->setVec3("observerUpDir", camUp.x, camUp.y, camUp.z);
     
     // Get shadow radius directly from mass (known formula for Schwarzschild black hole)
-    float shadowRadius = 2.6f * m_uiState.mass;
+    float shadowRadius = 2.0f * m_uiState.mass; // Exact Schwarzschild radius
     
     // Set physics parameters
     m_blackHoleShader->setFloat("timeDilation", 1.0f); // Simplified time dilation
@@ -541,7 +765,7 @@ void Renderer::renderFrame() {
     m_blackHoleShader->setFloat("diskOuterRadius", diskOuterRadius);
     m_blackHoleShader->setFloat("diskTemperature", 1.0f);
     
-    // Set boolean uniforms (using existing method for Shader class)
+    // Set boolean uniforms using integers
     m_blackHoleShader->setInt("showAccretionDisk", m_uiState.showAccretionDisk ? 1 : 0);
     m_blackHoleShader->setInt("enableDopplerEffect", m_uiState.enableDopplerEffect ? 1 : 0);
     m_blackHoleShader->setInt("enableGravitationalRedshift", m_uiState.enableGravitationalRedshift ? 1 : 0);
