@@ -1,5 +1,6 @@
-#include "renderer.h"
+#include "./renderer.h"
 #include <iostream>
+#include <cstring> // For strcmp function
 
 /**
  * Main entry point for the black hole visualization application

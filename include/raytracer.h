@@ -33,6 +33,47 @@ typedef enum {
 } IntegrationMethod;
 
 /**
+ * Jittering methods for supersampling
+ */
+typedef enum {
+    JITTER_NONE,          /* No jittering */
+    JITTER_REGULAR_GRID,  /* Regular grid pattern */
+    JITTER_RANDOM,        /* Random jittering */
+    JITTER_HALTON,        /* Halton sequence (quasi-random) */
+    JITTER_BLUE_NOISE     /* Blue noise (high quality but expensive) */
+} JitterMethod;
+
+/**
+ * Supersampling parameters 
+ */
+typedef struct {
+    int samples_per_pixel;      /* Number of samples per pixel (e.g., 1, 4, 16) */
+    JitterMethod jitter_method; /* Method to distribute samples within pixel */
+    double jitter_strength;     /* Strength of jitter (0.0-1.0) */
+} SupersamplingParams;
+
+/**
+ * Adaptive sampling parameters
+ */
+typedef struct {
+    int enable_adaptive;        /* Whether to use adaptive sampling */
+    int min_samples;            /* Minimum samples per pixel */
+    int max_samples;            /* Maximum samples per pixel */
+    double convergence_threshold; /* Threshold for adaptive convergence */
+    double edge_threshold;      /* Threshold for edge detection */
+} AdaptiveSamplingParams;
+
+/**
+ * Temporal accumulation parameters for reducing flicker
+ */
+typedef struct {
+    int enable_accumulation;    /* Whether to use temporal accumulation */
+    double blend_factor;        /* How much to blend with previous frame (0.0-1.0) */
+    int max_accumulation_frames; /* Maximum number of frames to accumulate */
+    int subpixel_jitter_index;  /* Current jitter index for progressive sampling */
+} TemporalAccumulationParams;
+
+/**
  * Information about ray intersection with an object
  */
 typedef struct {
@@ -65,6 +106,17 @@ typedef struct {
 } GPUShaderParams;
 
 /**
+ * Adaptive step control parameters
+ */
+typedef struct {
+    double abs_tolerance;      /* Absolute error tolerance (e.g., 1e-10) */
+    double rel_tolerance;      /* Relative error tolerance (e.g., 1e-10) */
+    double min_step;           /* Minimum allowed step size */
+    double max_step;           /* Maximum allowed step size */
+    double horizon_safety_factor; /* Step size limiter near horizon (e.g., 0.01) */
+} AdaptiveStepParams;
+
+/**
  * Trace a ray through curved spacetime around a black hole
  * 
  * @param ray The ray to trace (origin and direction)
@@ -79,6 +131,38 @@ RayTraceResult trace_ray(const Ray* ray,
                          const AccretionDiskParams* disk,
                          const SimulationConfig* config,
                          RayTraceHit* hit);
+
+/**
+ * Trace a pixel with supersampling and/or adaptive sampling
+ * 
+ * @param pixel_x X coordinate of the pixel
+ * @param pixel_y Y coordinate of the pixel
+ * @param width Width of the image
+ * @param height Height of the image
+ * @param camera Camera parameters
+ * @param blackhole Black hole parameters
+ * @param disk Accretion disk parameters
+ * @param config Simulation configuration
+ * @param ss_params Supersampling parameters
+ * @param as_params Adaptive sampling parameters
+ * @param color_out Output color (RGB)
+ * @return Result code
+ */
+RayTraceResult trace_pixel(
+    int pixel_x,
+    int pixel_y,
+    int width,
+    int height,
+    const Vector3D* camera_position,
+    const Vector3D* camera_direction,
+    const Vector3D* camera_up,
+    double fov,
+    const BlackHoleParams* blackhole,
+    const AccretionDiskParams* disk,
+    const SimulationConfig* config,
+    const SupersamplingParams* ss_params,
+    const AdaptiveSamplingParams* as_params,
+    double color_out[3]);
 
 /**
  * Integrates a photon path through curved spacetime using numerical methods
@@ -202,5 +286,15 @@ void apply_relativistic_effects(
 double calculate_shadow_radius(
     const BlackHoleParams* blackhole,
     double inclination);
+
+/**
+ * Halton sequence for generating well-distributed quasi-random numbers
+ * Used for jittering in supersampling
+ * 
+ * @param index The index in the sequence
+ * @param base The base of the sequence (prime numbers work best)
+ * @return A value in range [0,1)
+ */
+double halton_sequence(int index, int base);
 
 #endif /* RAYTRACER_H */ 

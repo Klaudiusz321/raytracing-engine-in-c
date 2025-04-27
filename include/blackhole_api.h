@@ -254,6 +254,37 @@ BHErrorCode bh_calculate_time_dilation(
  */
 void bh_get_version(int* major, int* minor, int* patch);
 
+/**
+ * Generate ray tracing data for visualization
+ * 
+ * @param context The black hole physics context
+ * @param observer_pos Observer position (x,y,z)
+ * @param observer_dir Observer direction (normalized)
+ * @param up_vector Camera up vector (normalized)
+ * @param width Width of output buffer
+ * @param height Height of output buffer
+ * @param fov Field of view in radians
+ * @param enable_doppler Enable Doppler effect (1=on, 0=off)
+ * @param enable_redshift Enable gravitational redshift (1=on, 0=off)
+ * @param show_disk Show accretion disk (1=on, 0=off)
+ * @param output_buffer Output RGBA buffer (size = width*height*4)
+ * 
+ * @return BH_SUCCESS on success, error code otherwise
+ */
+BHErrorCode bh_generate_shader_data(
+    void* context,
+    const float observer_pos[3],
+    const float observer_dir[3],
+    const float up_vector[3],
+    int width, 
+    int height,
+    float fov,
+    int enable_doppler,
+    int enable_redshift,
+    int show_disk,
+    float* output_buffer
+);
+
 #ifdef __cplusplus
 }
 #endif

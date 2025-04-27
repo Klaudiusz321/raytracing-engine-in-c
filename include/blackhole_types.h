@@ -108,7 +108,10 @@ typedef struct {
     int use_adaptive_step;     /* Whether to use adaptive step size (1) or fixed (0) */
     int use_gpu_raytracing;    /* Whether to use GPU (1) or CPU (0) for ray tracing */
     double doppler_factor;     /* Scaling for Doppler effect visualization */
-    double hawking_temp_factor; /* Scaling for Hawking radiation temperature */
+    double hawking_temp_factor;
+    double enable_doppler;
+    double enable_gravitational_redshift;
+    double show_accretion_disk;
 } SimulationConfig;
 
 /**

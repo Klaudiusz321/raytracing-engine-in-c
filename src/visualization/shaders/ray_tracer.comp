@@ -1,0 +1,647 @@
+#version 430 core
+
+// Input rays
+layout(std430, binding = 0) readonly buffer RayInput {
+    vec4 origins[4000000]; // Support up to 2K resolution (2048x1536 = ~3.1M)
+    vec4 directions[4000000];
+};
+
+// Output colors
+layout(std430, binding = 1) writeonly buffer RayOutput {
+    vec4 colors[4000000];
+};
+
+// Parameters
+layout(std140, binding = 2) uniform BlackHoleParams {
+    // Black hole parameters
+    float mass;            // Black hole mass
+    float spin;            // Black hole spin (a)
+    float rs;              // Schwarzschild radius
+    float r_isco;          // Innermost stable circular orbit radius
+    float r_horizon;       // Event horizon radius
+    
+    // Disk parameters
+    float disk_inner_radius;
+    float disk_outer_radius;
+    float disk_temp_scale;
+    float disk_density_scale;
+    float disk_inclination; // Inclination of disk relative to equatorial plane
+    
+    // Observer parameters
+    vec3 observer_pos;     // Observer position in (r, theta, phi) spherical coordinates
+    vec3 observer_dir;     // Observer direction
+    vec3 up_vector;        // Observer up vector
+    
+    // Viewing parameters
+    float fov;             // Field of view in degrees
+    float aspect_ratio;    // Width / height
+    
+    // Feature flags
+    int enable_doppler;    // 1 to enable doppler effect, 0 to disable
+    int enable_redshift;   // 1 to enable gravitational redshift, 0 to disable
+    int show_disk;         // 1 to show accretion disk, 0 to hide
+    int adaptive_stepping; // 1 to use adaptive step size, 0 for fixed
+    
+    // Integration parameters
+    int max_steps;         // Maximum integration steps per ray
+    float step_size;       // Base step size for integration
+    float tolerance;       // Error tolerance for adaptive stepping
+    float max_distance;    // Maximum distance to trace
+    float celestial_sphere_radius; // Radius of background sphere
+} params;
+
+// Layout specification - using 16x16 workgroups
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Constants
+const float PI = 3.14159265359;
+const float EPSILON = 1e-6;
+const float C_LIGHT = 299792458.0; // Speed of light (m/s)
+const float G_CONSTANT = 6.67430e-11; // Gravitational constant
+
+// Background stars texture
+layout(binding = 0) uniform sampler2D backgroundTexture;
+
+// Utility functions
+// Convert Cartesian to spherical coordinates (r, theta, phi)
+vec3 cartesianToSpherical(vec3 cart) {
+    float r = length(cart);
+    float theta = acos(cart.z / r);
+    float phi = atan(cart.y, cart.x);
+    return vec3(r, theta, phi);
+}
+
+// Convert spherical to Cartesian coordinates
+vec3 sphericalToCartesian(vec3 sph) {
+    float r = sph.x;
+    float theta = sph.y;
+    float phi = sph.z;
+    return vec3(
+        r * sin(theta) * cos(phi),
+        r * sin(theta) * sin(phi),
+        r * cos(theta)
+    );
+}
+
+// Temperature to RGB conversion for blackbody radiation
+vec3 temperatureToRGB(float temperature) {
+    // Based on approximation of blackbody radiation
+    vec3 color;
+    
+    // Normalize temperature (K) to visible spectrum
+    float t = clamp(temperature / 40000.0, 0.0, 1.0);
+    
+    // Blackbody color approximation
+    if (t <= 0.2) {
+        // Deep red to red
+        float n = t / 0.2;
+        color = vec3(n * 0.5, 0.0, 0.0);
+    } else if (t <= 0.4) {
+        // Red to orange-yellow
+        float n = (t - 0.2) / 0.2;
+        color = vec3(0.5 + n * 0.5, n * 0.5, 0.0);
+    } else if (t <= 0.6) {
+        // Yellow to white-yellow
+        float n = (t - 0.4) / 0.2;
+        color = vec3(1.0, 0.5 + n * 0.5, n * 0.7);
+    } else if (t <= 0.8) {
+        // White-yellow to white-blue
+        float n = (t - 0.6) / 0.2;
+        color = vec3(1.0, 1.0, 0.7 + n * 0.3);
+    } else {
+        // White-blue to blue-white
+        float n = (t - 0.8) / 0.2;
+        color = vec3(1.0 - n * 0.2, 1.0 - n * 0.3, 1.0);
+    }
+    
+    return color;
+}
+
+// Apply doppler and gravitational redshift effects to color
+vec3 applyRelativisticEffects(vec3 color, float doppler_factor, float redshift_factor) {
+    vec3 result = color;
+    
+    // Apply doppler shift if enabled
+    if (params.enable_doppler == 1) {
+        // Shift wavelength by doppler factor
+        // Simplified model: blue shift when approaching, red shift when receding
+        if (doppler_factor > 1.0) {
+            // Blue shift (approaching)
+            result.b = min(1.0, result.b * doppler_factor);
+            result.r /= doppler_factor;
+        } else {
+            // Red shift (receding)
+            result.r = min(1.0, result.r / doppler_factor);
+            result.b *= doppler_factor;
+        }
+    }
+    
+    // Apply gravitational redshift if enabled
+    if (params.enable_redshift == 1) {
+        // Gravitational redshift makes everything more red and less blue
+        result.r = min(1.0, result.r / redshift_factor);
+        result.g = min(1.0, result.g / sqrt(redshift_factor));
+        result.b *= redshift_factor;
+    }
+    
+    return result;
+}
+
+// Calculate the Kerr metric components at a given position
+// Returns a 4x4 matrix of metric components
+mat4 calculateKerrMetric(vec3 pos) {
+    // Extract position in Boyer-Lindquist coordinates
+    float r = pos.x;
+    float theta = pos.y;
+    
+    // Black hole parameters
+    float M = params.mass;
+    float a = params.spin;
+    
+    // Prevent singularity
+    r = max(r, params.r_horizon * 1.001);
+    
+    // Precompute common factors
+    float sin_theta = sin(theta);
+    float sin_theta_sq = sin_theta * sin_theta;
+    float cos_theta = cos(theta);
+    float cos_theta_sq = cos_theta * cos_theta;
+    
+    float r_sq = r * r;
+    float a_sq = a * a;
+    
+    float Sigma = r_sq + a_sq * cos_theta_sq;
+    float Delta = r_sq - 2.0 * M * r + a_sq;
+    float A = (r_sq + a_sq) * (r_sq + a_sq) - Delta * a_sq * sin_theta_sq;
+    
+    // Initialize metric with zeros
+    mat4 g;
+    g[0][0] = -(1.0 - 2.0 * M * r / Sigma);
+    g[0][3] = -2.0 * M * r * a * sin_theta_sq / Sigma;
+    g[1][1] = Sigma / Delta;
+    g[2][2] = Sigma;
+    g[3][0] = g[0][3]; // Symmetry
+    g[3][3] = (r_sq + a_sq + 2.0 * M * r * a_sq * sin_theta_sq / Sigma) * sin_theta_sq;
+    
+    return g;
+}
+
+// Calculate the inverse Kerr metric (needed for raising indices)
+mat4 calculateInverseKerrMetric(vec3 pos) {
+    // Extract position
+    float r = pos.x;
+    float theta = pos.y;
+    
+    // Black hole parameters
+    float M = params.mass;
+    float a = params.spin;
+    
+    // Prevent singularity
+    r = max(r, params.r_horizon * 1.001);
+    
+    // Precompute common factors
+    float sin_theta = sin(theta);
+    float sin_theta_sq = sin_theta * sin_theta;
+    float cos_theta = cos(theta);
+    float cos_theta_sq = cos_theta * cos_theta;
+    
+    float r_sq = r * r;
+    float a_sq = a * a;
+    
+    float Sigma = r_sq + a_sq * cos_theta_sq;
+    float Delta = r_sq - 2.0 * M * r + a_sq;
+    
+    // Initialize inverse metric
+    mat4 g_inv;
+    
+    // Compute components of the inverse metric
+    g_inv[0][0] = -((r_sq + a_sq) * (r_sq + a_sq) - Delta * a_sq * sin_theta_sq) / (Sigma * Delta);
+    g_inv[0][3] = -a * (1.0 - (r_sq + a_sq) / Delta) / Sigma;
+    g_inv[1][1] = Delta / Sigma;
+    g_inv[2][2] = 1.0 / Sigma;
+    g_inv[3][0] = g_inv[0][3]; // Symmetry
+    g_inv[3][3] = (Delta - a_sq * sin_theta_sq) / (Sigma * Delta * sin_theta_sq);
+    
+    return g_inv;
+}
+
+// Check if ray intersects with accretion disk
+bool checkDiskIntersection(vec3 pos, vec3 dir, out float distance, out vec3 hitPoint, out float doppler_factor) {
+    // Only check if disk is enabled
+    if (params.show_disk == 0) {
+        return false;
+    }
+    
+    // Transform to Cartesian for easier intersection test
+    vec3 cart_pos = sphericalToCartesian(pos);
+    vec3 cart_dir = normalize(sphericalToCartesian(pos + dir) - cart_pos);
+    
+    // For tilted disk, rotate position and direction
+    mat3 disk_rotation = mat3(1.0); // Identity by default
+    
+    if (abs(params.disk_inclination) > EPSILON) {
+        float incl = params.disk_inclination;
+        // Rotation matrix around x-axis
+        disk_rotation = mat3(
+            1, 0, 0,
+            0, cos(incl), -sin(incl),
+            0, sin(incl), cos(incl)
+        );
+        
+        // Apply rotation
+        cart_pos = disk_rotation * cart_pos;
+        cart_dir = normalize(disk_rotation * cart_dir);
+    }
+    
+    // Disk is in x-y plane (z=0) after rotation
+    if (abs(cart_dir.z) < EPSILON) {
+        return false; // Parallel to disk plane
+    }
+    
+    // Calculate intersection distance
+    distance = -cart_pos.z / cart_dir.z;
+    
+    // Check if intersection is in front of ray
+    if (distance < 0.0) {
+        return false;
+    }
+    
+    // Calculate hit point
+    hitPoint = cart_pos + cart_dir * distance;
+    
+    // Check if hit is within disk bounds
+    float r = length(hitPoint.xy);
+    if (r < params.disk_inner_radius || r > params.disk_outer_radius) {
+        return false;
+    }
+    
+    // Calculate doppler factor due to orbital velocity
+    // Keplerian orbital velocity: v = sqrt(G*M/r)
+    float orbital_velocity = sqrt(params.mass / r);
+    
+    // Direction of orbital velocity (perpendicular to radius)
+    vec2 orbit_dir = normalize(vec2(-hitPoint.y, hitPoint.x));
+    
+    // Calculate doppler factor based on angle between ray and orbital velocity
+    vec2 ray_dir_xy = normalize(cart_dir.xy);
+    float cos_angle = dot(ray_dir_xy, orbit_dir);
+    
+    // Relativistic doppler factor: sqrt((1-v/c)/(1+v/c))
+    // Using simplified factor for the shader
+    float v_c = orbital_velocity / C_LIGHT;
+    doppler_factor = sqrt((1.0 - v_c * cos_angle) / (1.0 + v_c * cos_angle));
+    
+    return true;
+}
+
+// Calculate conserved quantities for geodesic
+void calculateConservedQuantities(vec3 pos, vec4 vel, out float E, out float L, out float Q) {
+    // Extract position and momentum
+    float r = pos.x;
+    float theta = pos.y;
+    float phi = pos.z;
+    
+    // Black hole parameters
+    float M = params.mass;
+    float a = params.spin;
+    
+    // Compute metric at this position
+    mat4 g = calculateKerrMetric(pos);
+    
+    // Energy (associated with time translation symmetry)
+    E = -dot(vec4(g[0][0], g[0][1], g[0][2], g[0][3]), vel);
+    
+    // Angular momentum (associated with axial symmetry)
+    L = dot(vec4(g[3][0], g[3][1], g[3][2], g[3][3]), vel);
+    
+    // Carter constant (hidden symmetry of Kerr spacetime)
+    float p_theta_sq = g[2][2] * vel.z * vel.z;
+    Q = p_theta_sq + cos(theta)*cos(theta) * (a*a * (1.0 - E*E) + L*L/(sin(theta)*sin(theta)));
+}
+
+// RK4 integrator for geodesics
+vec4 integrateGeodesic(vec3 start_pos, vec4 start_vel, out bool hit_horizon, out vec3 end_pos) {
+    // Starting conditions
+    vec3 pos = start_pos;
+    vec4 vel = start_vel; // 4-velocity components: (t, r, theta, phi)
+    
+    // Calculate conserved quantities - these remain constant throughout motion
+    float E, L, Q;
+    calculateConservedQuantities(pos, vel, E, L, Q);
+    
+    // Integration parameters
+    int steps = 0;
+    float h = params.step_size;
+    hit_horizon = false;
+    
+    // Early termination when close to horizon to avoid wasted steps
+    // Also use smaller steps when close to BH for better accuracy
+    float r_threshold = params.r_horizon * 2.0;
+    
+    while (steps < params.max_steps) {
+        // Check if we've hit the horizon - terminate early
+        if (pos.x <= params.r_horizon * 1.05) {
+            hit_horizon = true;
+            break;
+        }
+        
+        // Check if we've gone too far
+        if (pos.x > params.max_distance) {
+            break;
+        }
+        
+        // Use smaller steps near the black hole for better accuracy
+        if (pos.x < r_threshold) {
+            h = params.step_size * 0.25 * (pos.x / r_threshold);
+            // Minimum step size to avoid extremely small steps
+            h = max(h, params.step_size * 0.05);
+        }
+        
+        // Store previous position for adaptive stepping
+        vec3 pos_prev = pos;
+        
+        // RK4 integration step
+        vec4 k1, k2, k3, k4;
+        vec4 vel_k1, vel_k2, vel_k3, vel_k4;
+        
+        // Kerr metric at current position
+        mat4 g = calculateKerrMetric(pos);
+        mat4 g_inv = calculateInverseKerrMetric(pos);
+        
+        // k1 = f(pos, vel)
+        // Geodesic equation: dx^μ/dλ = v^μ
+        k1 = vec4(1.0, vel.y, vel.z, vel.w);
+        
+        // Compute acceleration using Christoffel symbols
+        // This is a simplified version for the shader
+        
+        // For r component (radial acceleration)
+        float Gamma_r = -0.5 * g_inv[1][1] * (
+            g[0][0] * vel.x * vel.x +
+            g[1][1] * vel.y * vel.y +
+            g[2][2] * vel.z * vel.z +
+            g[3][3] * vel.w * vel.w +
+            2.0 * g[0][3] * vel.x * vel.w
+        );
+        
+        // For theta component (latitudinal acceleration)
+        float Gamma_theta = -0.5 * g_inv[2][2] * (
+            g[0][0] * vel.x * vel.x +
+            g[1][1] * vel.y * vel.y +
+            g[2][2] * vel.z * vel.z +
+            g[3][3] * vel.w * vel.w +
+            2.0 * g[0][3] * vel.x * vel.w
+        );
+        
+        // For phi component (azimuthal acceleration)
+        float Gamma_phi = -0.5 * g_inv[3][3] * (
+            g[0][0] * vel.x * vel.x +
+            g[1][1] * vel.y * vel.y +
+            g[2][2] * vel.z * vel.z +
+            g[3][3] * vel.w * vel.w +
+            2.0 * g[0][3] * vel.x * vel.w
+        );
+        
+        vel_k1 = vec4(0.0, Gamma_r, Gamma_theta, Gamma_phi);
+        
+        // k2 = f(pos + h/2 * k1, vel + h/2 * vel_k1)
+        vec3 pos2 = pos + 0.5 * h * k1.yzw;
+        vec4 vel2 = vel + 0.5 * h * vel_k1;
+        
+        g = calculateKerrMetric(pos2);
+        g_inv = calculateInverseKerrMetric(pos2);
+        
+        k2 = vec4(1.0, vel2.y, vel2.z, vel2.w);
+        
+        // Repeat for k2
+        Gamma_r = -0.5 * g_inv[1][1] * (
+            g[0][0] * vel2.x * vel2.x +
+            g[1][1] * vel2.y * vel2.y +
+            g[2][2] * vel2.z * vel2.z +
+            g[3][3] * vel2.w * vel2.w +
+            2.0 * g[0][3] * vel2.x * vel2.w
+        );
+        
+        Gamma_theta = -0.5 * g_inv[2][2] * (
+            g[0][0] * vel2.x * vel2.x +
+            g[1][1] * vel2.y * vel2.y +
+            g[2][2] * vel2.z * vel2.z +
+            g[3][3] * vel2.w * vel2.w +
+            2.0 * g[0][3] * vel2.x * vel2.w
+        );
+        
+        Gamma_phi = -0.5 * g_inv[3][3] * (
+            g[0][0] * vel2.x * vel2.x +
+            g[1][1] * vel2.y * vel2.y +
+            g[2][2] * vel2.z * vel2.z +
+            g[3][3] * vel2.w * vel2.w +
+            2.0 * g[0][3] * vel2.x * vel2.w
+        );
+        
+        vel_k2 = vec4(0.0, Gamma_r, Gamma_theta, Gamma_phi);
+        
+        // k3 = f(pos + h/2 * k2, vel + h/2 * vel_k2)
+        vec3 pos3 = pos + 0.5 * h * k2.yzw;
+        vec4 vel3 = vel + 0.5 * h * vel_k2;
+        
+        g = calculateKerrMetric(pos3);
+        g_inv = calculateInverseKerrMetric(pos3);
+        
+        k3 = vec4(1.0, vel3.y, vel3.z, vel3.w);
+        
+        // Repeat for k3
+        Gamma_r = -0.5 * g_inv[1][1] * (
+            g[0][0] * vel3.x * vel3.x +
+            g[1][1] * vel3.y * vel3.y +
+            g[2][2] * vel3.z * vel3.z +
+            g[3][3] * vel3.w * vel3.w +
+            2.0 * g[0][3] * vel3.x * vel3.w
+        );
+        
+        Gamma_theta = -0.5 * g_inv[2][2] * (
+            g[0][0] * vel3.x * vel3.x +
+            g[1][1] * vel3.y * vel3.y +
+            g[2][2] * vel3.z * vel3.z +
+            g[3][3] * vel3.w * vel3.w +
+            2.0 * g[0][3] * vel3.x * vel3.w
+        );
+        
+        Gamma_phi = -0.5 * g_inv[3][3] * (
+            g[0][0] * vel3.x * vel3.x +
+            g[1][1] * vel3.y * vel3.y +
+            g[2][2] * vel3.z * vel3.z +
+            g[3][3] * vel3.w * vel3.w +
+            2.0 * g[0][3] * vel3.x * vel3.w
+        );
+        
+        vel_k3 = vec4(0.0, Gamma_r, Gamma_theta, Gamma_phi);
+        
+        // k4 = f(pos + h * k3, vel + h * vel_k3)
+        vec3 pos4 = pos + h * k3.yzw;
+        vec4 vel4 = vel + h * vel_k3;
+        
+        g = calculateKerrMetric(pos4);
+        g_inv = calculateInverseKerrMetric(pos4);
+        
+        k4 = vec4(1.0, vel4.y, vel4.z, vel4.w);
+        
+        // Repeat for k4
+        Gamma_r = -0.5 * g_inv[1][1] * (
+            g[0][0] * vel4.x * vel4.x +
+            g[1][1] * vel4.y * vel4.y +
+            g[2][2] * vel4.z * vel4.z +
+            g[3][3] * vel4.w * vel4.w +
+            2.0 * g[0][3] * vel4.x * vel4.w
+        );
+        
+        Gamma_theta = -0.5 * g_inv[2][2] * (
+            g[0][0] * vel4.x * vel4.x +
+            g[1][1] * vel4.y * vel4.y +
+            g[2][2] * vel4.z * vel4.z +
+            g[3][3] * vel4.w * vel4.w +
+            2.0 * g[0][3] * vel4.x * vel4.w
+        );
+        
+        Gamma_phi = -0.5 * g_inv[3][3] * (
+            g[0][0] * vel4.x * vel4.x +
+            g[1][1] * vel4.y * vel4.y +
+            g[2][2] * vel4.z * vel4.z +
+            g[3][3] * vel4.w * vel4.w +
+            2.0 * g[0][3] * vel4.x * vel4.w
+        );
+        
+        vel_k4 = vec4(0.0, Gamma_r, Gamma_theta, Gamma_phi);
+        
+        // Update position and velocity using weighted average
+        vec4 pos_update = (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+        vec4 vel_update = (vel_k1 + 2.0 * vel_k2 + 2.0 * vel_k3 + vel_k4) / 6.0;
+        
+        pos += h * pos_update.yzw;
+        vel += h * vel_update;
+        
+        // Check if conserved quantities are violated (error check)
+        float E_new, L_new, Q_new;
+        calculateConservedQuantities(pos, vel, E_new, L_new, Q_new);
+        float error_E = abs(E_new - E) / abs(E);
+        float error_L = abs(L_new - L) / max(abs(L), 0.001);
+        float error_Q = abs(Q_new - Q) / max(abs(Q), 0.001);
+        float max_error = max(error_E, max(error_L, error_Q));
+        
+        // Adaptive step size if enabled
+        if (params.adaptive_stepping == 1) {
+            // Adjust step size based on error
+            if (max_error > 0.01) {
+                h *= 0.5; // Reduce step size
+            } else if (max_error < 0.001 && pos.x > r_threshold) {
+                h *= 1.5; // Increase step size if far from BH and error is small
+            }
+            
+            // Clamp step size
+            h = clamp(h, params.step_size * 0.01, params.step_size * 10.0);
+        }
+        
+        steps++;
+    }
+    
+    end_pos = pos;
+    return vel;
+}
+
+// Main ray tracing function
+void main() {
+    // Get invocation ID (pixel coordinates)
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    
+    // Compute linear index into the image
+    uint index = pixel.y * gl_WorkGroupSize.x * gl_NumWorkGroups.x + pixel.x;
+    
+    // Hard-coded bounds check instead of using origins.length()
+    if (pixel.x >= 4096 || pixel.y >= 4096) {
+        // Outside of valid range - just write a default color
+        colors[index] = vec4(0.0, 0.0, 0.1, 1.0);
+        return;
+    }
+    
+    // Safely access origin and direction from fixed arrays
+    vec3 origin = origins[index].xyz;
+    vec3 direction = directions[index].xyz;
+    
+    // Default background color (dark blue space)
+    vec4 color = vec4(0.0, 0.0, 0.1, 1.0);
+    
+    // Convert to spherical coordinates for ray tracing
+    vec3 sph_origin = cartesianToSpherical(origin);
+    vec3 cart_dir = normalize(direction);
+    
+    // Create initial 4-velocity
+    vec4 velocity = vec4(1.0, cart_dir.x, cart_dir.y, cart_dir.z);
+    
+    // Normalize to ensure null geodesic
+    mat4 g = calculateKerrMetric(sph_origin);
+    float g_dot_v = dot(vec4(g[0][0], g[0][1], g[0][2], g[0][3]), velocity);
+    velocity = velocity / sqrt(abs(g_dot_v));
+    
+    // Trace the geodesic
+    bool hit_bh = false;
+    vec3 end_pos;
+    vec4 end_vel = integrateGeodesic(sph_origin, velocity, hit_bh, end_pos);
+    
+    if (hit_bh) {
+        // Ray hit the black hole (render black)
+        color = vec4(0.0, 0.0, 0.0, 1.0);
+    } else {
+        // Gradually make color more intense toward center of the screen
+        // This creates a simple but visible effect to indicate rendering is working
+        uvec2 center = uvec2(gl_WorkGroupSize.xy * gl_NumWorkGroups.xy) / 2;
+        float dist = length(vec2(pixel) - vec2(center));
+        float maxDist = length(vec2(center));
+        float factor = 1.0 - clamp(dist / maxDist, 0.0, 1.0);
+        
+        // Disk parameters from uniform
+        float innerRadius = params.disk_inner_radius;
+        float outerRadius = params.disk_outer_radius;
+        
+        // Check for disk intersection
+        float disk_distance;
+        vec3 disk_hit_point;
+        float doppler_factor;
+        
+        if (params.show_disk == 1 && 
+            checkDiskIntersection(sph_origin, cart_dir, disk_distance, disk_hit_point, doppler_factor)) {
+            
+            // Calculate disk temperature based on radius
+            float r = length(disk_hit_point.xy);
+            float normalized_radius = (r - innerRadius) / (outerRadius - innerRadius);
+            normalized_radius = clamp(normalized_radius, 0.0, 1.0);
+            
+            // Temperature peaks at inner edge and falls off with radius
+            float temp_factor = pow(1.0 - normalized_radius, 0.75);
+            float temperature = params.disk_temp_scale * (3000.0 + 30000.0 * temp_factor);
+            
+            // Get disk color from temperature
+            vec3 disk_color = temperatureToRGB(temperature);
+            
+            // Calculate gravitational redshift factor
+            float redshift_factor = sqrt(1.0 - params.rs / r);
+            
+            // Apply relativistic effects
+            disk_color = applyRelativisticEffects(disk_color, doppler_factor, redshift_factor);
+            
+            color = vec4(disk_color, 1.0);
+        } else {
+            // Ray hit background - apply a simple radial gradient
+            // This is a temporary visualization until we fix texture sampling
+            color = vec4(0.0, 0.0, 0.1 + 0.3 * factor, 1.0);
+            
+            // Add a hint of reddish-orange gradient to simulate gravitational lensing
+            if (factor > 0.7) {
+                float lensing = (factor - 0.7) / 0.3;
+                color.r += lensing * 0.8;
+                color.g += lensing * 0.3;
+            }
+        }
+    }
+    
+    // Output the color
+    colors[index] = color;
+} 
