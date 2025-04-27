@@ -132,7 +132,6 @@ void test_particle_orbits(BHContextHandle context) {
     printf("Testing particle orbit calculation...\n");
     
     // Test parameters
-    // double mass = 10.0;
     int num_positions = 5;
     
     // Allocate space for positions dynamically

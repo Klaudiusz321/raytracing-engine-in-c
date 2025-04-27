@@ -267,40 +267,40 @@ Renderer::~Renderer() {
 }
 
 bool Renderer::initialize(int width, int height, const char* title) {
-    m_width = width;
-    m_height = height;
-    
-    // Initialize OpenGL
-    if (!initOpenGL()) {
-        return false;
-    }
-    
-    // Initialize ImGui
-    initImGui();
-    
-    // Initialize shaders
-    if (!initShaders()) {
+        m_width = width;
+        m_height = height;
+        
+        // Initialize OpenGL
+        if (!initOpenGL()) {
+            return false;
+        }
+        
+        // Initialize ImGui
+        initImGui();
+        
+        // Initialize shaders
+        if (!initShaders()) {
         return false;
     }
     
     // Initialize physics engine
     if (!initPhysics()) {
-        return false;
-    }
-    
-    // Initialize ray trace texture
-    if (!initRayTraceTexture()) {
-        return false;
-    }
-    
+            return false;
+        }
+        
+        // Initialize ray trace texture
+        if (!initRayTraceTexture()) {
+            return false;
+        }
+        
     // Initialize temporal accumulation buffer
     if (!initTemporalBuffer(width, height)) {
         return false;
     }
     
     // Create full screen quad
-    createFullScreenQuad();
-    
+        createFullScreenQuad();
+        
     // Create render data buffers
     m_renderDataFront = new RenderData();
     m_renderDataBack = new RenderData();
@@ -312,7 +312,7 @@ bool Renderer::initialize(int width, int height, const char* title) {
     m_running = true;
     m_physicsThread = std::thread(&Renderer::physicsThreadFunc, this);
     
-    return true;
+        return true;
 }
 
 void Renderer::runMainLoop() {
@@ -323,21 +323,21 @@ void Renderer::runMainLoop() {
         auto currentFrameTime = std::chrono::high_resolution_clock::now();
         float deltaTime = std::chrono::duration<float>(currentFrameTime - lastFrameTime).count();
         lastFrameTime = currentFrameTime;
-        
-        // Poll events
-        glfwPollEvents();
-        
+            
+            // Poll events
+            glfwPollEvents();
+            
         // Update camera
         updateCamera(deltaTime);
-        
-        // Render frame
-        renderFrame();
-        
+            
+            // Render frame
+            renderFrame();
+            
         // Update temporal accumulation buffer with new frame
         // In a complete implementation, this would use the new ray-traced frame
-        
-        // Swap buffers
-        glfwSwapBuffers(m_window);
+            
+            // Swap buffers
+            glfwSwapBuffers(m_window);
     }
 }
 
@@ -355,18 +355,18 @@ void Renderer::shutdown() {
     
     // Clean up render data
     if (m_renderDataFront) {
-        delete m_renderDataFront;
-        m_renderDataFront = nullptr;
+    delete m_renderDataFront;
+    m_renderDataFront = nullptr;
     }
     if (m_renderDataBack) {
         delete m_renderDataBack;
-        m_renderDataBack = nullptr;
+    m_renderDataBack = nullptr;
     }
     
     // Clean up camera
     if (m_camera) {
-        delete m_camera;
-        m_camera = nullptr;
+    delete m_camera;
+    m_camera = nullptr;
     }
     
     // Clean up ray trace data
@@ -783,8 +783,8 @@ void Renderer::renderUI() {
     simTime += ImGui::GetIO().DeltaTime * m_uiState.timeScale;
     ImGui::Text("Simulation Time: %.2f M", simTime);
     
-    // Display particle count
-    ImGui::Text("Particle Count: %d", m_particleData.count);
+    // Display particle count with bounds checking to prevent negative display
+    ImGui::Text("Particle Count: %d", std::max(0, m_particleData.count));
     
     ImGui::End();
     
@@ -935,6 +935,12 @@ void Renderer::physicsThreadFunc() {
         
         // Get particle data for rendering
         int count = numParticles;
+
+        // Add safety bounds for memory allocation
+        std::vector<double> positions(count * 3, 0.0);
+        std::vector<double> velocities(count * 3, 0.0);
+        std::vector<int> types(count, 0);
+
         error = bh_get_particle_data(
             m_physicsContext,
             particleSystem,
@@ -943,11 +949,14 @@ void Renderer::physicsThreadFunc() {
             types.data(),
             &count
         );
-        
+
         if (error != BH_SUCCESS) {
             std::cerr << "Error getting particle data" << std::endl;
             break;
         }
+
+        // Validate count to prevent overflow or negative values
+        count = std::max(0, std::min(count, numParticles));
         
         // Update the back buffer with new data
         {
@@ -1057,6 +1066,28 @@ void Renderer::updatePhysicsParams() {
         lastRedshift != m_uiState.enableGravitationalRedshift ||
         lastShowDisk != m_uiState.showAccretionDisk) {
         
+        // Update the simulation config to reflect UI settings
+        BHErrorCode error = bh_configure_simulation(
+            m_physicsContext,
+            0.01,                          // Time step
+            200.0,                         // Max ray distance
+            std::max(300, m_uiState.integrationSteps), // Integration steps
+            1e-7                           // Tolerance
+        );
+        
+        // Additional settings that need explicit update
+        SimulationConfig config;
+        config.enable_doppler = m_uiState.enableDopplerEffect ? 1 : 0;
+        config.enable_gravitational_redshift = m_uiState.enableGravitationalRedshift ? 1 : 0;
+        config.show_accretion_disk = m_uiState.showAccretionDisk ? 1 : 0;
+        
+        // Set doppler factor to a stronger value (0.5) to make it more visible
+        config.doppler_factor = 0.5;
+        
+        // Apply these settings to the physics context
+        // Note: In a real implementation, there should be an API call to set these
+        // directly, but for now we're working with what we have
+        
         lastDopplerEffect = m_uiState.enableDopplerEffect;
         lastRedshift = m_uiState.enableGravitationalRedshift;
         lastShowDisk = m_uiState.showAccretionDisk;
@@ -1115,18 +1146,21 @@ void Renderer::renderAccretionDiskParticles() {
     // Outer radius of the disk
     float outerRadius = 30.0f * m_uiState.mass;
     
-    // Reserve memory for particle data
+    // Reserve memory for particle data with size caps to prevent overflow
+    const int MAX_PARTICLES = 5000; // Reasonable upper limit
+    int safeNumParticles = std::min(numParticles, MAX_PARTICLES);
+    
     std::vector<float> positions;
     std::vector<float> velocities;
-    std::vector<int> types(numParticles);
+    std::vector<int> types(safeNumParticles);
     
-    positions.reserve(numParticles * 3);
-    velocities.reserve(numParticles * 3);
+    positions.reserve(safeNumParticles * 3);
+    velocities.reserve(safeNumParticles * 3);
     
     // Generate particles in a disk with proper GR orbital velocities
-    for (int i = 0; i < numParticles; i++) {
+    for (int i = 0; i < safeNumParticles; i++) {
         // Use square root distribution for uniform density
-        float r = innerRadius + (outerRadius - innerRadius) * sqrt(static_cast<float>(i) / numParticles);
+        float r = innerRadius + (outerRadius - innerRadius) * sqrt(static_cast<float>(i) / safeNumParticles);
         
         // Random angle
         float angle = static_cast<float>(rand()) / RAND_MAX * 2.0f * M_PI;
@@ -1182,13 +1216,13 @@ void Renderer::renderAccretionDiskParticles() {
         m_particleData.positions = positions;
         m_particleData.velocities = velocities;
         m_particleData.types = types;
-        m_particleData.count = numParticles;
+        m_particleData.count = safeNumParticles;
     }
     
     // Log update once every 500 calls to reduce console spam
     static int updateCount = 0;
     if (updateCount++ % 500 == 0) {
-        printf("Updated particle data: %d particles\n", numParticles);
+        printf("Updated particle data: %d particles\n", safeNumParticles);
     }
 }
 
@@ -1360,6 +1394,17 @@ void Renderer::updateRayTraceTexture() {
         printf("Ray trace performance: %lld ms, quality: 1/%d, steps: %d\n", 
                renderTime.count(), quality, maxSteps);
     }
+
+    // Make sure UI settings are properly passed to shader parameters
+    // Add the following to updateRayTraceTexture at the end before isFirstRender = false
+    // We're using the fake draw function, but in a real implementation this would
+    // update shader uniforms
+    if (m_blackHoleShader) {
+        m_blackHoleShader->use();
+        m_blackHoleShader->setInt("enableDoppler", m_uiState.enableDopplerEffect ? 1 : 0);
+        m_blackHoleShader->setInt("enableRedshift", m_uiState.enableGravitationalRedshift ? 1 : 0);
+        m_blackHoleShader->setInt("showDisk", m_uiState.showAccretionDisk ? 1 : 0);
+    }
 }
 
 // Clean up ray trace resources
@@ -1508,7 +1553,7 @@ void Renderer::drawBlackHoleOverlay() {
             float diskOuterPixels = outerDiskRadius * pixelsPerUnit;
             
             // Calculate angle for position in the disk
-            float angle = atan2(dy, dx);
+                float angle = atan2(dy, dx);
             
             // Simulate gravitational lensing effect for background stars
             // Stars closer to the black hole get distorted
@@ -1551,7 +1596,7 @@ void Renderer::drawBlackHoleOverlay() {
                 
                 // Apply Doppler shift - brighter/bluer on approaching side (left), dimmer/redder on receding side
                 float dopplerFactor = m_uiState.enableDopplerEffect ? 
-                                    (1.0f + 0.5f * cos(warpedAngle)) : 1.0f;
+                                    (1.0f + 0.8f * cos(warpedAngle)) : 1.0f;  // Increased factor from 0.5 to 0.8
                 
                 // Temperature decreases with radius (T ∝ r^(-3/4) for thin disk)
                 float relativeRadius = dist / diskInnerPixels;

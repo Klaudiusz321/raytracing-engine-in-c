@@ -394,10 +394,9 @@ int calculate_kerr_metric_bl(const double position[4], double a, double M, KerrM
     double two_mr = 2.0 * M * r;
     
     double Sigma = r_sq + a_sq * cos_theta_sq;
-    (void)Sigma;
     double Delta = r_sq - two_mr + a_sq;
     double A = (r_sq + a_sq) * (r_sq + a_sq) - Delta * a_sq * sin_theta_sq;
-    (void)A;
+    (void)A;  // Silence unused variable warning
     
     // Calculate metric components
     // Time-time component

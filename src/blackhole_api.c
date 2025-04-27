@@ -14,6 +14,11 @@
 #include <string.h>
 #include <math.h>
 
+/* Define PI if not already defined */
+#ifndef BH_PI
+#define BH_PI 3.14159265358979323846
+#endif
+
 #define HIT_BLACKHOLE RAY_HORIZON
 #define HIT_ACCRETION_DISK RAY_DISK
 #define HIT_BACKGROUND RAY_BACKGROUND
@@ -488,7 +493,7 @@ void bh_get_version(int* major, int* minor, int* patch) {
  * @return Error code
  */
 BHErrorCode bh_generate_shader_data(
-    BHContextHandle context,
+    void* context,
     const float observer_pos[3],
     const float observer_dir[3],
     const float up_vector[3],
@@ -503,6 +508,9 @@ BHErrorCode bh_generate_shader_data(
     if (!context || !observer_pos || !observer_dir || !up_vector || !output_buffer) {
         return BH_ERROR_INVALID_PARAMETER;
     }
+    
+    // Cast the void* to BHContextHandle for internal use
+    BHContextHandle ctx = (BHContextHandle)context;
     
     // Convert field of view to radians
     float fov_radians = fov * (float)BH_PI / 180.0f;
@@ -550,18 +558,18 @@ BHErrorCode bh_generate_shader_data(
     } shader_params;
     
     // Fill black hole parameters
-    shader_params.mass = (float)context->blackhole.mass;
-    shader_params.spin = (float)context->blackhole.spin;
-    shader_params.schwarzschild_radius = (float)context->blackhole.schwarzschild_radius;
-    shader_params.r_isco = (float)context->blackhole.isco_radius;
-    shader_params.r_horizon = (float)context->blackhole.r_plus;
+    shader_params.mass = (float)ctx->blackhole.mass;
+    shader_params.spin = (float)ctx->blackhole.spin;
+    shader_params.schwarzschild_radius = (float)ctx->blackhole.schwarzschild_radius;
+    shader_params.r_isco = (float)ctx->blackhole.isco_radius;
+    shader_params.r_horizon = (float)ctx->blackhole.r_plus;
     
     // Fill disk parameters
-    if (show_disk && context->disk_enabled) {
-        shader_params.disk_inner_radius = (float)context->disk.inner_radius;
-        shader_params.disk_outer_radius = (float)context->disk.outer_radius;
-        shader_params.disk_temp_scale = (float)context->disk.temperature_scale;
-        shader_params.disk_density_scale = (float)context->disk.density_scale;
+    if (show_disk && ctx->disk_enabled) {
+        shader_params.disk_inner_radius = (float)ctx->disk.inner_radius;
+        shader_params.disk_outer_radius = (float)ctx->disk.outer_radius;
+        shader_params.disk_temp_scale = (float)ctx->disk.temperature_scale;
+        shader_params.disk_density_scale = (float)ctx->disk.density_scale;
     } else {
         // Disable disk by setting inner radius beyond outer
         shader_params.disk_inner_radius = 1000.0f;
@@ -582,13 +590,13 @@ BHErrorCode bh_generate_shader_data(
     // Fill feature flags
     shader_params.enable_doppler = enable_doppler;
     shader_params.enable_redshift = enable_redshift;
-    shader_params.show_disk = show_disk && context->disk_enabled;
+    shader_params.show_disk = show_disk && ctx->disk_enabled;
     
     // Fill integration parameters
-    shader_params.max_steps = context->config.max_integration_steps;
-    shader_params.step_size = (float)context->config.time_step;
-    shader_params.tolerance = (float)context->config.tolerance;
-    shader_params.max_distance = (float)context->config.max_ray_distance;
+    shader_params.max_steps = ctx->config.max_integration_steps;
+    shader_params.step_size = (float)ctx->config.time_step;
+    shader_params.tolerance = (float)ctx->config.tolerance;
+    shader_params.max_distance = (float)ctx->config.max_ray_distance;
     
     // Clear padding
     memset(shader_params.padding, 0, sizeof(shader_params.padding));

@@ -109,9 +109,9 @@ typedef struct {
     int use_gpu_raytracing;    /* Whether to use GPU (1) or CPU (0) for ray tracing */
     double doppler_factor;     /* Scaling for Doppler effect visualization */
     double hawking_temp_factor;
-    double enable_doppler;
-    double enable_gravitational_redshift;
-    double show_accretion_disk;
+    int enable_doppler;        /* Enable Doppler effect (1=on, 0=off) */
+    int enable_gravitational_redshift; /* Enable gravitational redshift (1=on, 0=off) */
+    int show_accretion_disk;   /* Show accretion disk (1=on, 0=off) */
 } SimulationConfig;
 
 /**

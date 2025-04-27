@@ -49,6 +49,7 @@ static void ray_derivatives(double t, const double state[], double derivatives[]
     double r = state[0];
     double theta = state[1];
     double phi = state[2];
+    (void)phi;
     
     double v_r = state[3];
     double v_theta = state[4];
@@ -65,6 +66,7 @@ static void ray_derivatives(double t, const double state[], double derivatives[]
         // In weak-field limit, we can use approximate lensing based on impact parameter
         // This is a simplified model for demonstration - would be more complex in practice
         double rs = blackhole->schwarzschild_radius;
+        (void)rs;
         double M = blackhole->mass;
         double impact_b = ray_params->impact_parameter;
         
@@ -149,19 +151,17 @@ static void ray_derivatives(double t, const double state[], double derivatives[]
             derivatives[i] = (derivatives[i] > 0) ? MAX_DERIV : -MAX_DERIV;
         }
     }
-    
-    return;
 }
 
 /**
  * Check if a ray intersects with the accretion disk
  */
 int check_disk_intersection(
-    const Vector3D* origin,
+    const Vector3D* position,
     const Vector3D* velocity,
     const Vector3D* disk_normal,
     const AccretionDiskParams* disk,
-    Vector3D* hit_point) 
+    Vector3D* hit_position)
 {
     // Disk assumed to be in x-y plane (normal = z-axis) for simplicity
     
@@ -174,7 +174,7 @@ int check_disk_intersection(
     }
     
     // Calculate distance to intersection
-    double t = -(vector3D_dot(*origin, *disk_normal)) / denom;
+    double t = -(vector3D_dot(*position, *disk_normal)) / denom;
     
     if (t < 0.0) {
         // Intersection is behind the ray
@@ -183,10 +183,10 @@ int check_disk_intersection(
     
     // Calculate intersection point
     Vector3D scaled_vel = vector3D_scale(*velocity, t);
-    *hit_point = vector3D_add(*origin, scaled_vel);
+    *hit_position = vector3D_add(*position, scaled_vel);
     
     // Check if hit point is within disk
-    double r = sqrt(hit_point->x * hit_point->x + hit_point->y * hit_point->y);
+    double r = sqrt(hit_position->x * hit_position->x + hit_position->y * hit_position->y);
     
     if (r >= disk->inner_radius && r <= disk->outer_radius) {
         return 1; // Hit the disk
@@ -254,7 +254,7 @@ void apply_relativistic_effects(
     
     // Doppler shift factor (approaching = blueshift, receding = redshift)
     // Updated to use pass-by-value
-    double doppler_factor = 1.0 + vector3D_dot(*velocity, tangent) * 0.1;
+    double doppler_factor = 1.0 + vector3D_dot(*velocity, tangent) * 0.5;
     
     // Gravitational redshift - fixed to pass the whole blackhole struct
     double grav_redshift = calculate_time_dilation(r, blackhole);
@@ -492,6 +492,7 @@ RayTraceResult integrate_photon_path(
     double distance_traveled = 0.0;
     
     Vector3D current_pos, prev_pos;
+    (void)prev_pos;  // Silence unused variable warning
     
     // Convert initial spherical position to Cartesian
     Vector3D sph_pos = {state[1], state[2], state[3]};
@@ -510,6 +511,7 @@ RayTraceResult integrate_photon_path(
     // Flag to indicate if we've switched to horizon-penetrating coordinates
     int using_horizon_penetrating = 0;
     double ingoing_time_offset = 0.0;
+    (void)ingoing_time_offset;
     
     // Integration loop
     while (step_count < config->max_integration_steps) {
@@ -586,24 +588,28 @@ RayTraceResult integrate_photon_path(
                     double h_current = h;
                     
                     // Use AdaptiveStepParams in the future for better control
+                    double eps_rel = config->tolerance;
+                    
                     retry = rkf45_integrate(
-                        ray_derivatives, 
+                        ray_derivatives,
                         state,
-                        8,
+                        6,  // Using 6 components (r, theta, phi and their derivatives)
                         &t_current,
                         h_current,
                         &h_next,
-                        config->tolerance,
+                        eps_rel,
                         &ray_params
                     );
                     
-                    // If step failed, retry with smaller step size
-                    if (retry) {
-                        h = h_current * 0.5;
-                        continue;
+                    if (retry && step_count == 0) {
+                        // First step failed, try again with a smaller step
+                        printf("[DEBUG] First RKF45 step failed, trying with smaller step\n");
+                        h = h * 0.1;  // Reduce step size
+                        h_next = h;
+                    } else {
+                        // Step succeeded or we've already retried
+                        t = t_current;
                     }
-                    
-                    t = t_current;
                 }
                 break;
                 
@@ -926,8 +932,11 @@ static void generate_jittered_position(
 }
 
 /**
- * Detect high gradient edges for adaptive sampling
+ * Calculate an edge factor for adaptive sampling
+ * Returns higher values for pixels at edges (high contrast areas)
  */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 static double calculate_edge_factor(
     int pixel_x, 
     int pixel_y,
@@ -982,6 +991,7 @@ static double calculate_edge_factor(
     
     return max_diff / edge_threshold; // Proportional factor
 }
+#pragma GCC diagnostic pop
 
 /**
  * Calculate camera ray direction for a given pixel and subpixel offset
